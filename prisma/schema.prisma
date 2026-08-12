@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../generated/prisma"
 }
 
 datasource db {
@@ -7,97 +8,259 @@ datasource db {
 }
 
 // ─────────────────────────────────────────────
-// HOTEL
+// BUSINESS
+// Negocio que utiliza el sistema de reservas
 // ─────────────────────────────────────────────
 
-model Hotel {
-  id          String  @id @default(cuid())
+model Business {
+  id             String @id @default(cuid())
+  businessTypeId String
+
   name        String
   slug        String  @unique
   description String?
-  email       String?
-  phone       String?
-  address     String?
-  city        String?
-  country     String  @default("El Salvador")
-  currency    String  @default("USD")
-  timezone    String  @default("America/El_Salvador")
 
+  email    String?
+  phone    String?
+  address  String?
+  city     String?
+  country  String  @default("El Salvador")
+  currency String  @default("USD")
+  timezone String  @default("America/El_Salvador")
+
+  // Usado principalmente por negocios de alojamiento.
   checkInTime  String?
   checkOutTime String?
+
+  // Configuración general
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  businessType BusinessType @relation(fields: [businessTypeId], references: [id])
+
+  services          Service[]
+  resources         Resource[]
+  resourceTypes     ResourceType[]
+  schedules         Schedule[]
+  availabilityRules AvailabilityRule[]
+
+  customers    Customer[]
+  reservations Reservation[]
+  payments     Payment[]
+  blocks       Block[]
+  users        User[]
+
+  @@index([businessTypeId])
+}
+
+// ─────────────────────────────────────────────
+// BUSINESS TYPE
+// Tipo de negocio
+// ─────────────────────────────────────────────
+
+model BusinessType {
+  id String @id @default(cuid())
+
+  name        String
+  slug        String  @unique
+  description String?
 
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  roomTypes    RoomType[]
-  reservations Reservation[]
-  blocks       Block[]
-  users        User[]
+  businesses Business[]
 }
 
 // ─────────────────────────────────────────────
-// ROOM TYPE / CATEGORÍA DE HABITACIÓN
+// SERVICE
+// Servicio que ofrece el negocio
+//
+// Hotel:
+//   Habitación Standard
+//   Habitación Deluxe
+//
+// Restaurante:
+//   Cena
+//   Almuerzo
+//
+// Clínica:
+//   Consulta general
+//   Consulta nutricional
+//
+// Salón:
+//   Corte
+//   Manicure
 // ─────────────────────────────────────────────
 
-model RoomType {
-  id      String @id @default(cuid())
-  hotelId String
+model Service {
+  id         String @id @default(cuid())
+  businessId String
 
   name        String
   slug        String
   description String?
 
-  maxAdults   Int @default(2)
-  maxChildren Int @default(0)
+  // Para reservas por tiempo:
+  // consulta de 30 min, cena de 90 min, corte de 45 min, etc.
+  durationMinutes Int?
+
+  // Capacidad general.
+  maxPeople Int @default(1)
+
+  // Datos opcionales útiles para alojamiento.
+  maxAdults   Int?
+  maxChildren Int?
 
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hotel            Hotel             @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  rooms            Room[]
-  rates            Rate[]
-  reservationRooms ReservationRoom[]
-  blocks           Block[]
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  @@unique([hotelId, slug])
-  @@index([hotelId])
+  resourceTypes ServiceResourceType[]
+  reservations  ReservationService[]
+  rates         ServiceRate[]
+  blocks        Block[]
+
+  @@unique([businessId, slug])
+  @@index([businessId])
 }
 
 // ─────────────────────────────────────────────
-// ROOM / HABITACIÓN FÍSICA
+// RESOURCE
+// Recurso físico o asignable
+//
+// Hotel:
+//   Habitación 101
+//
+// Restaurante:
+//   Mesa 1
+//
+// Clínica:
+//   Consultorio 1
+//
+// Salón:
+//   Silla 3
 // ─────────────────────────────────────────────
 
-model Room {
-  id         String @id @default(cuid())
-  roomTypeId String
+model Resource {
+  id             String  @id @default(cuid())
+  businessId     String
+  resourceTypeId String?
 
-  number String
-  floor  Int?
+  name String
+  code String?
+
+  floor    Int?
+  capacity Int  @default(1)
 
   isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  roomType         RoomType          @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
-  reservationRooms ReservationRoom[]
-  blocks           Block[]
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  @@unique([roomTypeId, number])
-  @@index([roomTypeId])
+  resourceType ResourceType? @relation(fields: [resourceTypeId], references: [id])
+
+  reservations ReservationResource[]
+  blocks       Block[]
+
+  @@unique([businessId, code])
+  @@index([businessId])
+  @@index([resourceTypeId])
 }
 
 // ─────────────────────────────────────────────
-// RATE / TARIFA
+// RESOURCE TYPE
+//
+// Hotel:
+//   Standard
+//   Deluxe
+//   Suite
+//
+// Restaurante:
+//   Mesa interior
+//   Terraza
+//
+// Clínica:
+//   Consultorio
 // ─────────────────────────────────────────────
 
-model Rate {
+model ResourceType {
   id         String @id @default(cuid())
-  roomTypeId String
+  businessId String
+
+  name        String
+  slug        String
+  description String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  resources Resource[]
+  services  ServiceResourceType[]
+  blocks    Block[]
+
+  @@unique([businessId, slug])
+  @@index([businessId])
+}
+
+// ─────────────────────────────────────────────
+// SERVICE ↔ RESOURCE TYPE
+//
+// Define qué tipos de recursos pueden satisfacer
+// un servicio.
+//
+// Hotel:
+//   Standard → ResourceType Standard
+//
+// Restaurante:
+//   Cena → ResourceType Mesa
+//
+// Clínica:
+//   Consulta → ResourceType Consultorio
+//
+// Salón:
+//   Corte → ResourceType Estación / Profesional
+// ─────────────────────────────────────────────
+
+model ServiceResourceType {
+  id             String @id @default(cuid())
+  serviceId      String
+  resourceTypeId String
+
+  requiredQuantity Int @default(1)
+
+  createdAt DateTime @default(now())
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  resourceType ResourceType @relation(fields: [resourceTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, resourceTypeId])
+  @@index([serviceId])
+  @@index([resourceTypeId])
+}
+
+// ─────────────────────────────────────────────
+// RATE
+// Tarifas para recursos/servicios
+//
+// Conservamos weekdayPrice y weekendPrice
+// porque el hotel las necesita desde el inicio.
+// ─────────────────────────────────────────────
+
+model ServiceRate {
+  id        String @id @default(cuid())
+  serviceId String
 
   name String
 
@@ -112,17 +275,81 @@ model Rate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  roomType RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
 
-  @@index([roomTypeId, startDate, endDate])
+  @@index([serviceId, startDate, endDate])
 }
 
 // ─────────────────────────────────────────────
-// CUSTOMER / CLIENTE
+// SCHEDULE
+// Horarios generales del negocio
+//
+// Ejemplo restaurante:
+// Lunes 12:00 - 22:00
+//
+// Clínica:
+// Lunes 08:00 - 17:00
+//
+// Salón:
+// Lunes 09:00 - 19:00
+// ─────────────────────────────────────────────
+model Schedule {
+  id         String @id @default(cuid())
+  businessId String
+
+  dayOfWeek Int
+
+  startTime String
+  endTime   String
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, dayOfWeek])
+}
+
+// ─────────────────────────────────────────────
+// AVAILABILITY RULE
+// Reglas especiales de disponibilidad
+// ─────────────────────────────────────────────
+
+model AvailabilityRule {
+  id         String @id @default(cuid())
+  businessId String
+
+  name String?
+
+  startDate DateTime?
+  endDate   DateTime?
+
+  startTime String?
+  endTime   String?
+
+  dayOfWeek Int?
+
+  capacity Int?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+}
+
+// ─────────────────────────────────────────────
+// CUSTOMER
 // ─────────────────────────────────────────────
 
 model Customer {
-  id String @id @default(cuid())
+  id         String @id @default(cuid())
+  businessId String
 
   firstName String
   lastName  String
@@ -133,29 +360,49 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
   reservations Reservation[]
 
+  @@index([businessId])
   @@index([email])
   @@index([phone])
 }
 
 // ─────────────────────────────────────────────
-// RESERVATION / RESERVA
+// RESERVATION
+// Reserva universal
+//
+// Hotel:
+//   startAt = check-in
+//   endAt   = check-out
+//
+// Restaurante:
+//   startAt = hora de reserva
+//   endAt   = hora de finalización
+//
+// Clínica:
+//   startAt = inicio de consulta
+//   endAt   = final de consulta
 // ─────────────────────────────────────────────
 
 model Reservation {
-  id      String @id @default(cuid())
-  hotelId String
-
+  id         String @id @default(cuid())
+  businessId String
   customerId String
 
   confirmationCode String @unique
 
-  checkIn  DateTime
-  checkOut DateTime
+  // Intervalo universal de reserva.
+  startAt DateTime
+  endAt   DateTime
 
-  adults   Int @default(1)
-  children Int @default(0)
+  // Capacidad universal.
+  guests Int @default(1)
+
+  // Opcionales para negocios de alojamiento.
+  adults   Int?
+  children Int?
 
   status ReservationStatus @default(PENDING)
 
@@ -169,52 +416,78 @@ model Reservation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hotel    Hotel    @relation(fields: [hotelId], references: [id])
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
   customer Customer @relation(fields: [customerId], references: [id])
 
-  rooms    ReservationRoom[]
-  payments Payment[]
+  services  ReservationService[]
+  resources ReservationResource[]
+  payments  Payment[]
 
-  @@index([hotelId, checkIn, checkOut])
+  @@index([businessId, startAt, endAt])
   @@index([customerId])
   @@index([status])
 }
 
 // ─────────────────────────────────────────────
-// RESERVATION ROOM
+// RESERVATION SERVICE
+// Servicios incluidos en una reserva
 // ─────────────────────────────────────────────
 
-model ReservationRoom {
-  id String @id @default(cuid())
-
+model ReservationService {
+  id            String @id @default(cuid())
   reservationId String
-  roomTypeId    String
-
-  roomId String?
+  serviceId     String
 
   quantity Int @default(1)
 
-  nightlyRate Decimal @db.Decimal(10, 2)
-  subtotal    Decimal @db.Decimal(10, 2)
+  unitPrice Decimal @db.Decimal(10, 2)
+  subtotal  Decimal @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
 
   reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
-  roomType    RoomType    @relation(fields: [roomTypeId], references: [id])
-  room        Room?       @relation(fields: [roomId], references: [id])
+
+  service Service @relation(fields: [serviceId], references: [id])
+
+  resources ReservationResource[]
 
   @@index([reservationId])
-  @@index([roomTypeId])
-  @@index([roomId])
+  @@index([serviceId])
 }
 
 // ─────────────────────────────────────────────
-// PAYMENT / PAGO
+// RESERVATION RESOURCE
+// Recurso físico asignado
+// ─────────────────────────────────────────────
+
+model ReservationResource {
+  id                   String  @id @default(cuid())
+  reservationId        String
+  reservationServiceId String?
+  resourceId           String
+
+  createdAt DateTime @default(now())
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  reservationService ReservationService? @relation(fields: [reservationServiceId], references: [id], onDelete: Cascade)
+
+  resource Resource @relation(fields: [resourceId], references: [id])
+
+  @@unique([reservationId, resourceId])
+  @@index([reservationId])
+  @@index([reservationServiceId])
+  @@index([resourceId])
+}
+
+// ─────────────────────────────────────────────
+// PAYMENT
 // ─────────────────────────────────────────────
 
 model Payment {
-  id String @id @default(cuid())
-
+  id            String @id @default(cuid())
+  businessId    String
   reservationId String
 
   amount Decimal @db.Decimal(10, 2)
@@ -230,47 +503,54 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
   reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
+  @@index([businessId])
   @@index([reservationId])
   @@index([status])
 }
 
 // ─────────────────────────────────────────────
-// BLOCK / BLOQUEO DE INVENTARIO
+// BLOCK
+// Bloqueo de recurso o servicio
 // ─────────────────────────────────────────────
 
 model Block {
-  id      String @id @default(cuid())
-  hotelId String
+  id         String @id @default(cuid())
+  businessId String
 
-  roomTypeId String?
-  roomId     String?
+  serviceId      String?
+  resourceTypeId String?
+  resourceId     String?
 
-  startDate DateTime
-  endDate   DateTime
+  startAt DateTime
+  endAt   DateTime
 
   reason String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hotel    Hotel     @relation(fields: [hotelId], references: [id], onDelete: Cascade)
-  roomType RoomType? @relation(fields: [roomTypeId], references: [id])
-  room     Room?     @relation(fields: [roomId], references: [id])
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  service      Service?      @relation(fields: [serviceId], references: [id])
+  resourceType ResourceType? @relation(fields: [resourceTypeId], references: [id])
+  resource     Resource?     @relation(fields: [resourceId], references: [id])
 
-  @@index([hotelId, startDate, endDate])
-  @@index([roomTypeId])
-  @@index([roomId])
+  @@index([businessId, startAt, endAt])
+  @@index([serviceId])
+  @@index([resourceTypeId])
+  @@index([resourceId])
 }
 
 // ─────────────────────────────────────────────
-// USER / USUARIO
+// USER
 // ─────────────────────────────────────────────
 
 model User {
-  id      String @id @default(cuid())
-  hotelId String
+  id         String @id @default(cuid())
+  businessId String
 
   name  String
   email String
@@ -282,10 +562,10 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  hotel Hotel @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  @@unique([hotelId, email])
-  @@index([hotelId])
+  @@unique([businessId, email])
+  @@index([businessId])
 }
 
 // ─────────────────────────────────────────────
@@ -315,6 +595,7 @@ enum PaymentMethod {
   PAYMENT_LINK
   CASH
   BANK_TRANSFER
+  CARD
   OTHER
 }
 

@@ -40,7 +40,19 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-/app/generated/prisma
+# Prisma generated client
+/generated/prisma/
+
+# Local database backups / temporary SQL
+/backup-before-generalize.sql
+/migration-preview.sql
+
+# Temporary diagnostic scripts
+/test-prisma.ts
+
+# Supabase local CLI state
+/supabase/.branches/
+/supabase/.temp/
 
 # AI agent files
 .agents/
