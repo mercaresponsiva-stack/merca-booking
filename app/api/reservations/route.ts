@@ -8,6 +8,10 @@ const ACTIVE_RESERVATION_STATUSES = [
   "CHECKED_IN",
 ] as const;
 
+const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
+
+type PaymentOption = (typeof PAYMENT_OPTIONS)[number];
+
 function generateConfirmationCode() {
   const random = randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase();
 
@@ -50,6 +54,8 @@ export async function POST(request: NextRequest) {
 
     const specialRequests = body.specialRequests ?? null;
 
+    const paymentOption = body.paymentOption as PaymentOption | undefined;
+
     // ─────────────────────────────────────────────
     // 1. REQUIRED FIELDS
     // ─────────────────────────────────────────────
@@ -66,6 +72,19 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error: "Faltan campos obligatorios",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!paymentOption || !PAYMENT_OPTIONS.includes(paymentOption)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Debes seleccionar una modalidad de pago válida: FULL o DEPOSIT_50",
         },
         {
           status: 400,
@@ -604,6 +623,8 @@ export async function POST(request: NextRequest) {
             subtotal,
             total,
 
+            paymentOption,
+
             specialRequests: specialRequests || null,
 
             source: "WEBSITE",
@@ -740,6 +761,8 @@ export async function POST(request: NextRequest) {
           subtotal: reservation.subtotal,
 
           total: reservation.total,
+
+          paymentOption: reservation.paymentOption,
 
           customer: reservation.customer,
 

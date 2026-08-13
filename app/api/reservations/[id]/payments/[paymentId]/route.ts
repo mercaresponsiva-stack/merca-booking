@@ -22,9 +22,14 @@ export async function PATCH(
     const status = body.status as TargetPaymentStatus | undefined;
 
     const externalReference =
-      body.externalReference !== undefined
+      body.externalReference !== undefined && body.externalReference !== null
         ? String(body.externalReference)
         : undefined;
+
+    const verifiedById =
+      body.verifiedById !== undefined && body.verifiedById !== null
+        ? String(body.verifiedById)
+        : null;
 
     // ─────────────────────────────────────────────
     // 1. VALIDAR STATUS
@@ -43,7 +48,7 @@ export async function PATCH(
     }
 
     // ─────────────────────────────────────────────
-    // 2. TRANSACCIÓN SERIALIZABLE
+    // 2. TRANSACTION
     // ─────────────────────────────────────────────
 
     const result = await prisma.$transaction(
@@ -62,6 +67,8 @@ export async function PATCH(
             status: true,
 
             total: true,
+
+            paymentOption: true,
           },
         });
 
@@ -95,26 +102,78 @@ export async function PATCH(
           throw new Error("PAYMENT_STATUS_ALREADY_SET");
         }
 
-        const transitionAllowed = isTransitionAllowed(payment.status, status);
-
-        if (!transitionAllowed) {
+        if (!isTransitionAllowed(payment.status, status)) {
           throw new Error("INVALID_PAYMENT_TRANSITION");
         }
 
         // ───────────────────────────────────────
-        // 5. SI VAMOS A CONFIRMAR COMO PAID,
-        //    RECALCULAR SALDO
-        //
-        // Esto evita:
-        //
-        // Reserva $240
-        // PENDING $200
-        // PENDING $200
-        //
-        // y que ambos puedan terminar PAID.
+        // 5. CONFIRMACIÓN PAID
         // ───────────────────────────────────────
 
+        let verifier: {
+          id: string;
+          name: string;
+          email: string;
+          role: string;
+        } | null = null;
+
+        let verificationDate: Date | null = null;
+
         if (status === "PAID") {
+          /*
+           * Ya no permitimos confirmar nuevos
+           * cobros después de que la reserva
+           * haya finalizado o sido cancelada.
+           */
+
+          if (
+            reservation.status === "CANCELLED" ||
+            reservation.status === "NO_SHOW" ||
+            reservation.status === "CHECKED_OUT" ||
+            reservation.status === "COMPLETED"
+          ) {
+            throw new Error("RESERVATION_NOT_PAYABLE");
+          }
+
+          // ─────────────────────────────────────
+          // BANK TRANSFER
+          //
+          // Requiere verificación humana.
+          // ─────────────────────────────────────
+
+          if (payment.method === "BANK_TRANSFER") {
+            if (!verifiedById) {
+              throw new Error("TRANSFER_VERIFIER_REQUIRED");
+            }
+
+            verifier = await tx.user.findFirst({
+              where: {
+                id: verifiedById,
+
+                businessId: reservation.businessId,
+
+                isActive: true,
+              },
+
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+              },
+            });
+
+            if (!verifier) {
+              throw new Error("PAYMENT_VERIFIER_NOT_FOUND");
+            }
+
+            verificationDate = new Date();
+          }
+
+          // ─────────────────────────────────────
+          // PREVENIR SOBREPAGO
+          // ─────────────────────────────────────
+
           const paidAggregate = await tx.payment.aggregate({
             where: {
               reservationId: reservation.id,
@@ -145,7 +204,7 @@ export async function PATCH(
         }
 
         // ───────────────────────────────────────
-        // 6. ACTUALIZAR PAYMENT
+        // 6. UPDATE PAYMENT
         // ───────────────────────────────────────
 
         const updatedPayment = await tx.payment.update({
@@ -156,15 +215,6 @@ export async function PATCH(
           data: {
             status,
 
-            /*
-             * PAID recibe timestamp.
-             *
-             * FAILED nunca fue pagado.
-             *
-             * REFUNDED conserva el paidAt
-             * original para no perder cuándo
-             * fue recibido originalmente.
-             */
             paidAt:
               status === "PAID"
                 ? new Date()
@@ -172,16 +222,50 @@ export async function PATCH(
                   ? null
                   : payment.paidAt,
 
+            /*
+             * Una transferencia confirmada
+             * conserva quién la verificó.
+             *
+             * FAILED limpia la verificación.
+             *
+             * REFUNDED conserva la verificación
+             * histórica del pago original.
+             */
+            verifiedAt:
+              status === "PAID" && payment.method === "BANK_TRANSFER"
+                ? verificationDate
+                : status === "FAILED"
+                  ? null
+                  : payment.verifiedAt,
+
+            verifiedById:
+              status === "PAID" && payment.method === "BANK_TRANSFER"
+                ? (verifier?.id ?? null)
+                : status === "FAILED"
+                  ? null
+                  : payment.verifiedById,
+
             ...(externalReference !== undefined
               ? {
                   externalReference,
                 }
               : {}),
           },
+
+          include: {
+            verifiedBy: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                role: true,
+              },
+            },
+          },
         });
 
         // ───────────────────────────────────────
-        // 7. NUEVO RESUMEN
+        // 7. RECALCULAR RESUMEN
         // ───────────────────────────────────────
 
         const payments = await tx.payment.findMany({
@@ -232,10 +316,6 @@ export async function PATCH(
       },
     );
 
-    // ─────────────────────────────────────────────
-    // 8. RESPONSE
-    // ─────────────────────────────────────────────
-
     return NextResponse.json({
       success: true,
 
@@ -247,6 +327,8 @@ export async function PATCH(
         status: result.reservation.status,
 
         total: result.reservation.total,
+
+        paymentOption: result.reservation.paymentOption,
       },
 
       payment: result.payment,
@@ -310,6 +392,50 @@ export async function PATCH(
       );
     }
 
+    if (error instanceof Error && error.message === "RESERVATION_NOT_PAYABLE") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "La reserva ya no permite confirmar nuevos pagos",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === "TRANSFER_VERIFIER_REQUIRED"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Debes indicar verifiedById para confirmar una transferencia bancaria",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === "PAYMENT_VERIFIER_NOT_FOUND"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "El usuario que verifica el pago no existe, está inactivo o no pertenece al negocio",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
     if (
       error instanceof Error &&
       error.message === "PAYMENT_EXCEEDS_CURRENT_BALANCE"
@@ -354,10 +480,6 @@ export async function PATCH(
     );
   }
 }
-
-// ─────────────────────────────────────────────
-// PAYMENT STATE MACHINE
-// ─────────────────────────────────────────────
 
 function isTransitionAllowed(
   currentStatus: string,
