@@ -1,3 +1,16 @@
+import {
+  getOverlapWhere,
+  isResourceBlocked,
+} from "@/lib/booking/resource-availability";
+
+import {
+  ACTIVE_RESERVATION_STATUSES,
+  isReservationActive,
+} from "@/lib/booking/reservation-state";
+import {
+  isResourceRequirementSatisfied,
+  resolveReservationServiceForResource,
+} from "@/lib/booking/resource-assignment-policy";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
@@ -93,12 +106,7 @@ export async function PATCH(
         // No tiene sentido asignar recursos a una
         // reserva finalizada o cancelada.
 
-        if (
-          reservation.status === "CANCELLED" ||
-          reservation.status === "NO_SHOW" ||
-          reservation.status === "CHECKED_OUT" ||
-          reservation.status === "COMPLETED"
-        ) {
+        if (!isReservationActive(reservation.status)) {
           throw new Error("RESERVATION_NOT_ASSIGNABLE");
         }
 
@@ -133,83 +141,23 @@ export async function PATCH(
           throw new Error("RESOURCE_TYPE_NOT_CONFIGURED");
         }
 
-        // ─────────────────────────────────────────
-        // 4. BUSCAR QUÉ SERVICIO PUEDE USAR
-        //    ESTE RESOURCE TYPE
-        //
-        // Standard Service
-        //       ↓
-        // Standard ResourceType
-        //       ↓
-        // 101 / 102
-        // ─────────────────────────────────────────
+        // ───────────────────────────────────────
+        // 4. RESOLVER SERVICE + RESOURCE TYPE
+        // ───────────────────────────────────────
 
-        const eligibleReservationServices = reservation.services.filter(
-          (reservationService) =>
-            reservationService.service.resourceTypes.some(
-              (requirement) =>
-                requirement.resourceTypeId === resource.resourceTypeId,
-            ),
-        );
+        const serviceResolution = resolveReservationServiceForResource({
+          services: reservation.services,
 
-        if (eligibleReservationServices.length === 0) {
-          throw new Error("RESOURCE_NOT_ALLOWED_FOR_SERVICE");
+          resourceTypeId: resource.resourceTypeId,
+
+          requestedReservationServiceId,
+        });
+
+        if (!serviceResolution.ok) {
+          throw new Error(serviceResolution.violation);
         }
 
-        let reservationService: (typeof eligibleReservationServices)[number];
-
-        // Si se especificó ReservationService,
-        // utilizamos exactamente ese.
-
-        if (requestedReservationServiceId) {
-          const requested = eligibleReservationServices.find(
-            (item) => item.id === requestedReservationServiceId,
-          );
-
-          if (!requested) {
-            throw new Error("RESERVATION_SERVICE_NOT_VALID");
-          }
-
-          reservationService = requested;
-        } else {
-          /*
-           * Para el hotel actual tendremos:
-           *
-           * Reservation
-           * └── ReservationService Standard
-           *
-           * así que podemos resolverlo
-           * automáticamente.
-           *
-           * En el futuro, si una reserva tiene
-           * varios servicios compatibles con el
-           * mismo ResourceType, exigiremos
-           * reservationServiceId.
-           */
-
-          if (eligibleReservationServices.length > 1) {
-            throw new Error("RESERVATION_SERVICE_REQUIRED");
-          }
-
-          reservationService = eligibleReservationServices[0];
-        }
-
-        // ─────────────────────────────────────────
-        // 5. RESOURCE REQUIREMENT
-        // ─────────────────────────────────────────
-
-        const requirement = reservationService.service.resourceTypes.find(
-          (item) => item.resourceTypeId === resource.resourceTypeId,
-        );
-
-        if (!requirement) {
-          throw new Error("RESOURCE_NOT_ALLOWED_FOR_SERVICE");
-        }
-
-        const requiredResourceCount = Math.max(
-          1,
-          reservationService.quantity * requirement.requiredQuantity,
-        );
+        const { reservationService, requiredResourceCount } = serviceResolution;
 
         // ─────────────────────────────────────────
         // 6. EVITAR DUPLICAR EL MISMO RESOURCE
@@ -233,12 +181,15 @@ export async function PATCH(
         //    RECURSOS DE ESTE TIPO?
         // ─────────────────────────────────────────
 
-        const assignedResourcesOfThisType = reservationService.resources.filter(
-          (assignment) =>
-            assignment.resource.resourceTypeId === resource.resourceTypeId,
-        );
+        if (
+          isResourceRequirementSatisfied(
+            reservationService,
 
-        if (assignedResourcesOfThisType.length >= requiredResourceCount) {
+            resource.resourceTypeId,
+
+            requiredResourceCount,
+          )
+        ) {
           throw new Error("RESOURCE_REQUIREMENT_ALREADY_SATISFIED");
         }
 
@@ -263,16 +214,10 @@ export async function PATCH(
 
             reservation: {
               status: {
-                notIn: ["CANCELLED", "NO_SHOW", "CHECKED_OUT", "COMPLETED"],
+                in: [...ACTIVE_RESERVATION_STATUSES],
               },
 
-              startAt: {
-                lt: reservation.endAt,
-              },
-
-              endAt: {
-                gt: reservation.startAt,
-              },
+              ...getOverlapWhere(reservation.startAt, reservation.endAt),
             },
           },
 
@@ -303,49 +248,21 @@ export async function PATCH(
         // Resource específico
         // ─────────────────────────────────────────
 
-        const block = await tx.block.findFirst({
+        const blocks = await tx.block.findMany({
           where: {
             businessId: reservation.businessId,
 
-            startAt: {
-              lt: reservation.endAt,
-            },
-
-            endAt: {
-              gt: reservation.startAt,
-            },
+            ...getOverlapWhere(reservation.startAt, reservation.endAt),
 
             OR: [
-              // Todo el negocio bloqueado
               {
                 serviceId: null,
-                resourceTypeId: null,
-                resourceId: null,
               },
 
-              // Servicio completo bloqueado
               {
                 serviceId: reservationService.serviceId,
-                resourceTypeId: null,
-                resourceId: null,
               },
 
-              // ResourceType bloqueado globalmente
-              {
-                serviceId: null,
-                resourceTypeId: resource.resourceTypeId,
-                resourceId: null,
-              },
-
-              // ResourceType bloqueado para
-              // este servicio
-              {
-                serviceId: reservationService.serviceId,
-                resourceTypeId: resource.resourceTypeId,
-                resourceId: null,
-              },
-
-              // Resource físico específico
               {
                 resourceId: resource.id,
               },
@@ -353,12 +270,21 @@ export async function PATCH(
           },
 
           select: {
-            id: true,
-            reason: true,
+            serviceId: true,
+            resourceTypeId: true,
+            resourceId: true,
           },
         });
 
-        if (block) {
+        const resourceBlocked = isResourceBlocked(blocks, {
+          serviceId: reservationService.serviceId,
+
+          resourceTypeId: resource.resourceTypeId,
+
+          resourceId: resource.id,
+        });
+
+        if (resourceBlocked) {
           throw new Error("RESOURCE_BLOCKED");
         }
 

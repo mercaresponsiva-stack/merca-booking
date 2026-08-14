@@ -1,12 +1,14 @@
+import {
+  getOverlapWhere,
+  getBlockedResourceIds,
+  isBusinessBlocked,
+  isResourceTypeBlocked,
+  isServiceBlocked,
+} from "@/lib/booking/resource-availability";
+import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-
-const ACTIVE_RESERVATION_STATUSES = [
-  "PENDING",
-  "CONFIRMED",
-  "CHECKED_IN",
-] as const;
 
 const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
 
@@ -305,14 +307,6 @@ export async function POST(request: NextRequest) {
           throw new Error("SERVICE_RESOURCE_NOT_CONFIGURED");
         }
 
-        const resourceTypeIds = service.resourceTypes.map(
-          (requirement) => requirement.resourceType.id,
-        );
-
-        const resourceIds = service.resourceTypes.flatMap((requirement) =>
-          requirement.resourceType.resources.map((resource) => resource.id),
-        );
-
         // ─────────────────────────────────────────
         // 10. OVERLAPPING RESERVATIONS
         //
@@ -332,13 +326,7 @@ export async function POST(request: NextRequest) {
                   in: [...ACTIVE_RESERVATION_STATUSES],
                 },
 
-                startAt: {
-                  lt: endAt,
-                },
-
-                endAt: {
-                  gt: startAt,
-                },
+                ...getOverlapWhere(startAt, endAt),
               },
             },
 
@@ -375,20 +363,26 @@ export async function POST(request: NextRequest) {
           where: {
             businessId: business.id,
 
-            startAt: {
-              lt: endAt,
-            },
-
-            endAt: {
-              gt: startAt,
-            },
+            ...getOverlapWhere(startAt, endAt),
 
             OR: [
               {
                 serviceId: null,
               },
+
               {
                 serviceId: service.id,
+              },
+
+              /*
+               * Un Resource físico bloqueado
+               * debe respetarse aunque el Block
+               * conserve otro serviceId.
+               */
+              {
+                resourceId: {
+                  not: null,
+                },
               },
             ],
           },
@@ -404,12 +398,7 @@ export async function POST(request: NextRequest) {
         // BUSINESS-WIDE BLOCK
         // ─────────────────────────────────────────
 
-        const businessBlocked = blocks.some(
-          (block) =>
-            block.serviceId === null &&
-            block.resourceTypeId === null &&
-            block.resourceId === null,
-        );
+        const businessBlocked = isBusinessBlocked(blocks);
 
         if (businessBlocked) {
           throw new Error("SERVICE_NOT_AVAILABLE");
@@ -419,12 +408,7 @@ export async function POST(request: NextRequest) {
         // SERVICE-WIDE BLOCK
         // ─────────────────────────────────────────
 
-        const serviceBlocked = blocks.some(
-          (block) =>
-            block.serviceId === service.id &&
-            block.resourceTypeId === null &&
-            block.resourceId === null,
-        );
+        const serviceBlocked = isServiceBlocked(blocks, service.id);
 
         if (serviceBlocked) {
           throw new Error("SERVICE_NOT_AVAILABLE");
@@ -502,10 +486,10 @@ export async function POST(request: NextRequest) {
           // RESOURCE TYPE BLOCK
           // ───────────────────────────────────────
 
-          const resourceTypeBlocked = blocks.some(
-            (block) =>
-              block.resourceTypeId === resourceType.id &&
-              block.resourceId === null,
+          const resourceTypeBlocked = isResourceTypeBlocked(
+            blocks,
+            service.id,
+            resourceType.id,
           );
 
           if (resourceTypeBlocked) {
@@ -516,14 +500,9 @@ export async function POST(request: NextRequest) {
           // SPECIFIC RESOURCE BLOCKS
           // ───────────────────────────────────────
 
-          const blockedResourceIds = new Set(
-            blocks
-              .filter(
-                (block) =>
-                  block.resourceId !== null &&
-                  currentResourceIds.has(block.resourceId),
-              )
-              .map((block) => block.resourceId as string),
+          const blockedResourceIds = getBlockedResourceIds(
+            blocks,
+            currentResourceIds,
           );
 
           // ───────────────────────────────────────

@@ -1,3 +1,6 @@
+import { isReservationPayable } from "@/lib/booking/reservation-state";
+import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
+import { fromCents, toCents } from "@/lib/booking/money";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
@@ -40,11 +43,11 @@ export async function GET(
       );
     }
 
-    const summary = calculatePaymentSummary(
-      reservation.total,
-      reservation.paymentOption,
-      reservation.payments,
-    );
+    const paymentSummary = calculatePaymentSummary({
+      total: Number(reservation.total),
+      paymentOption: reservation.paymentOption,
+      payments: reservation.payments,
+    });
 
     return NextResponse.json({
       success: true,
@@ -61,7 +64,7 @@ export async function GET(
         paymentOption: reservation.paymentOption,
       },
 
-      paymentSummary: summary,
+      paymentSummary,
 
       payments: reservation.payments,
     });
@@ -140,12 +143,7 @@ export async function POST(
           throw new Error("RESERVATION_NOT_FOUND");
         }
 
-        if (
-          reservation.status === "CANCELLED" ||
-          reservation.status === "NO_SHOW" ||
-          reservation.status === "CHECKED_OUT" ||
-          reservation.status === "COMPLETED"
-        ) {
+        if (!isReservationPayable(reservation.status)) {
           throw new Error("RESERVATION_NOT_PAYABLE");
         }
 
@@ -169,15 +167,15 @@ export async function POST(
           },
         });
 
-        const totalCents = toCents(Number(reservation.total));
+        const paymentSummary = calculatePaymentSummary({
+          total: Number(reservation.total),
+          paymentOption: reservation.paymentOption,
+          payments,
+        });
 
-        const paidCents = payments
-          .filter((payment) => payment.status === "PAID")
-          .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
+        const balanceCents = toCents(paymentSummary.balance);
 
-        const balanceCents = Math.max(totalCents - paidCents, 0);
-
-        if (balanceCents <= 0) {
+        if (paymentSummary.isPaid) {
           throw new Error("RESERVATION_ALREADY_PAID");
         }
 
@@ -198,9 +196,7 @@ export async function POST(
             throw new Error("CASH_ONLY_AT_CHECK_IN");
           }
 
-          const depositCents = calculateDepositCents(totalCents);
-
-          if (paidCents < depositCents) {
+          if (!paymentSummary.initialPaymentSatisfied) {
             throw new Error("INITIAL_DEPOSIT_NOT_PAID");
           }
 
@@ -307,31 +303,19 @@ export async function POST(
         // DEPOSIT_50
         // ─────────────────────────────────────
         else {
-          const depositCents = calculateDepositCents(totalCents);
-
-          /*
-           * Una vez alcanzado el 50%,
-           * ya no permitimos otro pago
-           * inicial online.
-           *
-           * El saldo queda reservado para
-           * CASH durante CHECK_IN.
-           */
-
-          if (paidCents >= depositCents) {
+          if (paymentSummary.initialPaymentSatisfied) {
             throw new Error("INITIAL_DEPOSIT_ALREADY_PAID");
           }
 
-          /*
-           * En el flujo nuevo el anticipo
-           * debe cobrarse completo de una vez.
-           */
-
-          if (paidCents > 0) {
+          if (paymentSummary.paid > 0) {
             throw new Error("PARTIAL_INITIAL_PAYMENT_NOT_SUPPORTED");
           }
 
-          amountCents = depositCents;
+          if (paymentSummary.requiredInitialPayment === null) {
+            throw new Error("PAYMENT_OPTION_NOT_CONFIGURED");
+          }
+
+          amountCents = toCents(paymentSummary.requiredInitialPayment);
         }
 
         // ─────────────────────────────────────
@@ -378,6 +362,10 @@ export async function POST(
       },
     );
 
+    // ─────────────────────────────────────────
+    // RECALCULAR RESUMEN FINANCIERO
+    // ─────────────────────────────────────────
+
     const updatedPayments = await prisma.payment.findMany({
       where: {
         reservationId: result.reservation.id,
@@ -388,11 +376,11 @@ export async function POST(
       },
     });
 
-    const paymentSummary = calculatePaymentSummary(
-      result.reservation.total,
-      result.reservation.paymentOption,
-      updatedPayments,
-    );
+    const paymentSummary = calculatePaymentSummary({
+      total: Number(result.reservation.total),
+      paymentOption: result.reservation.paymentOption,
+      payments: updatedPayments,
+    });
 
     return NextResponse.json(
       {
@@ -633,89 +621,4 @@ export async function POST(
       },
     );
   }
-}
-
-// ─────────────────────────────────────────────
-// PAYMENT SUMMARY
-// ─────────────────────────────────────────────
-
-function calculatePaymentSummary(
-  totalValue: unknown,
-  paymentOption: "FULL" | "DEPOSIT_50" | null,
-  payments: Array<{
-    amount: unknown;
-    status: string;
-  }>,
-) {
-  const totalCents = toCents(Number(totalValue));
-
-  const paidCents = payments
-    .filter((payment) => payment.status === "PAID")
-    .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
-
-  const pendingCents = payments
-    .filter((payment) => payment.status === "PENDING")
-    .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
-
-  const refundedCents = payments
-    .filter((payment) => payment.status === "REFUNDED")
-    .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
-
-  const balanceCents = Math.max(totalCents - paidCents, 0);
-
-  const depositCents =
-    paymentOption === "DEPOSIT_50"
-      ? calculateDepositCents(totalCents)
-      : totalCents;
-
-  const initialPaymentRemainingCents = Math.max(depositCents - paidCents, 0);
-
-  return {
-    total: fromCents(totalCents),
-
-    paid: fromCents(paidCents),
-
-    pending: fromCents(pendingCents),
-
-    refunded: fromCents(refundedCents),
-
-    balance: fromCents(balanceCents),
-
-    isPaid: balanceCents === 0,
-
-    paymentOption,
-
-    requiredInitialPayment: fromCents(depositCents),
-
-    initialPaymentRemaining: fromCents(initialPaymentRemainingCents),
-
-    initialPaymentSatisfied: initialPaymentRemainingCents === 0,
-
-    balanceDueAt:
-      paymentOption === "DEPOSIT_50" &&
-      balanceCents > 0 &&
-      initialPaymentRemainingCents === 0
-        ? "CHECK_IN"
-        : null,
-  };
-}
-
-// ─────────────────────────────────────────────
-// MONEY HELPERS
-//
-// Todos los cálculos internos se realizan
-// en centavos para evitar problemas de
-// punto flotante.
-// ─────────────────────────────────────────────
-
-function toCents(amount: number) {
-  return Math.round(amount * 100);
-}
-
-function fromCents(cents: number) {
-  return cents / 100;
-}
-
-function calculateDepositCents(totalCents: number) {
-  return Math.round(totalCents / 2);
 }

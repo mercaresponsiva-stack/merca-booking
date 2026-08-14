@@ -1,3 +1,13 @@
+import {
+  getBlockedResourceIds,
+  getOverlapWhere,
+  isBusinessBlocked,
+  isResourceTypeBlocked,
+  isServiceBlocked,
+} from "@/lib/booking/resource-availability";
+
+import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
+
 import { prisma } from "@/lib/prisma";
 
 type AvailabilityInput = {
@@ -166,16 +176,10 @@ export async function getAvailability({
             businessId,
 
             status: {
-              notIn: ["CANCELLED", "NO_SHOW", "CHECKED_OUT", "COMPLETED"],
+              in: [...ACTIVE_RESERVATION_STATUSES],
             },
 
-            startAt: {
-              lt: checkOut,
-            },
-
-            endAt: {
-              gt: checkIn,
-            },
+            ...getOverlapWhere(checkIn, checkOut),
           },
         },
 
@@ -212,20 +216,26 @@ export async function getAvailability({
       where: {
         businessId,
 
-        startAt: {
-          lt: checkOut,
-        },
-
-        endAt: {
-          gt: checkIn,
-        },
+        ...getOverlapWhere(checkIn, checkOut),
 
         OR: [
           {
             serviceId: null,
           },
+
           {
             serviceId: service.id,
+          },
+
+          /*
+           * Un Resource físico bloqueado
+           * debe respetarse aunque el Block
+           * conserve un serviceId.
+           */
+          {
+            resourceId: {
+              not: null,
+            },
           },
         ],
       },
@@ -241,12 +251,7 @@ export async function getAvailability({
     // BUSINESS-WIDE BLOCK
     // ───────────────────────────────────────────
 
-    const businessBlocked = blocks.some(
-      (block) =>
-        block.serviceId === null &&
-        block.resourceTypeId === null &&
-        block.resourceId === null,
-    );
+    const businessBlocked = isBusinessBlocked(blocks);
 
     if (businessBlocked) {
       continue;
@@ -256,12 +261,7 @@ export async function getAvailability({
     // SERVICE-WIDE BLOCK
     // ───────────────────────────────────────────
 
-    const serviceBlocked = blocks.some(
-      (block) =>
-        block.serviceId === service.id &&
-        block.resourceTypeId === null &&
-        block.resourceId === null,
-    );
+    const serviceBlocked = isServiceBlocked(blocks, service.id);
 
     if (serviceBlocked) {
       continue;
@@ -371,9 +371,10 @@ export async function getAvailability({
       // bloqueado.
       // ─────────────────────────────────────────
 
-      const resourceTypeBlocked = blocks.some(
-        (block) =>
-          block.resourceTypeId === resourceType.id && block.resourceId === null,
+      const resourceTypeBlocked = isResourceTypeBlocked(
+        blocks,
+        service.id,
+        resourceType.id,
       );
 
       if (resourceTypeBlocked) {
@@ -399,14 +400,7 @@ export async function getAvailability({
       // Resource 101 bloqueado.
       // ─────────────────────────────────────────
 
-      const blockedResourceIds = new Set(
-        blocks
-          .filter(
-            (block) =>
-              block.resourceId !== null && resourceIds.has(block.resourceId),
-          )
-          .map((block) => block.resourceId as string),
-      );
+      const blockedResourceIds = getBlockedResourceIds(blocks, resourceIds);
 
       // ─────────────────────────────────────────
       // PHYSICALLY FREE RESOURCES

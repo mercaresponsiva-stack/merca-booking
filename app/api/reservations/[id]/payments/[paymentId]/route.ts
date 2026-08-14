@@ -1,9 +1,11 @@
+import { isReservationPayable } from "@/lib/booking/reservation-state";
+import {
+  isPaymentTargetStatus,
+  isPaymentTransitionAllowed,
+} from "@/lib/booking/payment-state";
+import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-
-const ALLOWED_TARGET_STATUSES = ["PAID", "FAILED", "REFUNDED"] as const;
-
-type TargetPaymentStatus = (typeof ALLOWED_TARGET_STATUSES)[number];
 
 export async function PATCH(
   request: NextRequest,
@@ -19,7 +21,7 @@ export async function PATCH(
 
     const body = await request.json();
 
-    const status = body.status as TargetPaymentStatus | undefined;
+    const status = body.status;
 
     const externalReference =
       body.externalReference !== undefined && body.externalReference !== null
@@ -35,7 +37,7 @@ export async function PATCH(
     // 1. VALIDAR STATUS
     // ─────────────────────────────────────────────
 
-    if (!status || !ALLOWED_TARGET_STATUSES.includes(status)) {
+    if (!isPaymentTargetStatus(status)) {
       return NextResponse.json(
         {
           success: false,
@@ -102,7 +104,7 @@ export async function PATCH(
           throw new Error("PAYMENT_STATUS_ALREADY_SET");
         }
 
-        if (!isTransitionAllowed(payment.status, status)) {
+        if (!isPaymentTransitionAllowed(payment.status, status)) {
           throw new Error("INVALID_PAYMENT_TRANSITION");
         }
 
@@ -126,12 +128,7 @@ export async function PATCH(
            * haya finalizado o sido cancelada.
            */
 
-          if (
-            reservation.status === "CANCELLED" ||
-            reservation.status === "NO_SHOW" ||
-            reservation.status === "CHECKED_OUT" ||
-            reservation.status === "COMPLETED"
-          ) {
+          if (!isReservationPayable(reservation.status)) {
             throw new Error("RESERVATION_NOT_PAYABLE");
           }
 
@@ -278,36 +275,18 @@ export async function PATCH(
           },
         });
 
-        const total = Number(reservation.total);
-
-        const paid = payments
-          .filter((item) => item.status === "PAID")
-          .reduce((sum, item) => sum + Number(item.amount), 0);
-
-        const pending = payments
-          .filter((item) => item.status === "PENDING")
-          .reduce((sum, item) => sum + Number(item.amount), 0);
-
-        const refunded = payments
-          .filter((item) => item.status === "REFUNDED")
-          .reduce((sum, item) => sum + Number(item.amount), 0);
-
-        const balance = Math.max(total - paid, 0);
+        const paymentSummary = calculatePaymentSummary({
+          total: Number(reservation.total),
+          paymentOption: reservation.paymentOption,
+          payments,
+        });
 
         return {
           reservation,
 
           payment: updatedPayment,
 
-          paymentSummary: {
-            total,
-            paid,
-            pending,
-            refunded,
-            balance,
-
-            isPaid: balance <= 0,
-          },
+          paymentSummary,
         };
       },
 
@@ -479,19 +458,4 @@ export async function PATCH(
       },
     );
   }
-}
-
-function isTransitionAllowed(
-  currentStatus: string,
-  targetStatus: TargetPaymentStatus,
-) {
-  if (currentStatus === "PENDING") {
-    return targetStatus === "PAID" || targetStatus === "FAILED";
-  }
-
-  if (currentStatus === "PAID") {
-    return targetStatus === "REFUNDED";
-  }
-
-  return false;
 }

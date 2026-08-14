@@ -1,17 +1,12 @@
+import { getReservationTransitionPolicyViolation } from "@/lib/booking/reservation-policy";
+import {
+  isReservationStatus,
+  isReservationTransitionAllowed,
+  type ReservationStatus,
+} from "@/lib/booking/reservation-state";
+import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-
-const RESERVATION_STATUSES = [
-  "PENDING",
-  "CONFIRMED",
-  "CANCELLED",
-  "NO_SHOW",
-  "CHECKED_IN",
-  "CHECKED_OUT",
-  "COMPLETED",
-] as const;
-
-type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
 
 export async function PATCH(
   request: NextRequest,
@@ -24,13 +19,13 @@ export async function PATCH(
 
     const body = await request.json();
 
-    const status = body.status as ReservationStatus | undefined;
+    const status = body.status;
 
     // ─────────────────────────────────────────────
     // 1. VALIDAR STATUS
     // ─────────────────────────────────────────────
 
-    if (!status || !RESERVATION_STATUSES.includes(status)) {
+    if (!isReservationStatus(status)) {
       return NextResponse.json(
         {
           success: false,
@@ -92,49 +87,19 @@ export async function PATCH(
         // 4. STATE MACHINE
         // ───────────────────────────────────────
 
-        if (!isTransitionAllowed(reservation.status, status)) {
+        if (!isReservationTransitionAllowed(reservation.status, status)) {
           throw new Error("INVALID_RESERVATION_TRANSITION");
         }
 
         // ───────────────────────────────────────
         // 5. PAYMENT SUMMARY
-        //
-        // Solamente PAID cuenta como dinero
-        // efectivamente recibido.
         // ───────────────────────────────────────
 
-        const totalCents = toCents(Number(reservation.total));
-
-        const paidCents = reservation.payments
-          .filter((payment) => payment.status === "PAID")
-          .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
-
-        const refundedCents = reservation.payments
-          .filter((payment) => payment.status === "REFUNDED")
-          .reduce((sum, payment) => sum + toCents(Number(payment.amount)), 0);
-
-        const balanceCents = Math.max(totalCents - paidCents, 0);
-
-        // ───────────────────────────────────────
-        // 6. INITIAL PAYMENT REQUIREMENT
-        //
-        // FULL       → 100%
-        // DEPOSIT_50 → 50%
-        //
-        // null se permite temporalmente para
-        // reservas históricas creadas antes
-        // de introducir PaymentOption.
-        // ───────────────────────────────────────
-
-        const requiredInitialPaymentCents = getRequiredInitialPaymentCents(
-          totalCents,
-          reservation.paymentOption,
-        );
-
-        const initialPaymentSatisfied =
-          requiredInitialPaymentCents === null
-            ? true
-            : paidCents >= requiredInitialPaymentCents;
+        const paymentSummary = calculatePaymentSummary({
+          total: Number(reservation.total),
+          paymentOption: reservation.paymentOption,
+          payments: reservation.payments,
+        });
 
         // ───────────────────────────────────────
         // 7. PENDING → CONFIRMED
@@ -144,61 +109,14 @@ export async function PATCH(
         // requerido.
         // ───────────────────────────────────────
 
-        if (status === "CONFIRMED" && !initialPaymentSatisfied) {
-          throw new Error("INITIAL_PAYMENT_REQUIRED_FOR_CONFIRMATION");
-        }
+        const policyViolation = getReservationTransitionPolicyViolation({
+          targetStatus: status,
+          paymentSummary,
+          services: reservation.services,
+        });
 
-        // ───────────────────────────────────────
-        // 8. CONFIRMED → CHECKED_IN
-        //
-        // Revalidamos el pago porque podría
-        // haberse realizado un refund después
-        // de confirmar la reserva.
-        // ───────────────────────────────────────
-
-        if (status === "CHECKED_IN" && !initialPaymentSatisfied) {
-          throw new Error("INITIAL_PAYMENT_REQUIRED_FOR_CHECK_IN");
-        }
-
-        // ───────────────────────────────────────
-        // 9. RESOURCE ASSIGNMENT BEFORE CHECK-IN
-        //
-        // Hotel:
-        //
-        // ReservationService Deluxe
-        //       ↓
-        // ResourceType Deluxe
-        //       ↓
-        // debe tener 201 o 202 asignada
-        //
-        // La implementación es genérica:
-        // funciona con cualquier Service que
-        // requiera Resources físicos.
-        // ───────────────────────────────────────
-
-        if (status === "CHECKED_IN") {
-          for (const reservationService of reservation.services) {
-            for (const requirement of reservationService.service
-              .resourceTypes) {
-              const requiredQuantity = Math.max(
-                1,
-                requirement.requiredQuantity,
-              );
-
-              const requiredResources =
-                reservationService.quantity * requiredQuantity;
-
-              const assignedResources = reservationService.resources.filter(
-                (assignment) =>
-                  assignment.resource.resourceTypeId ===
-                  requirement.resourceTypeId,
-              ).length;
-
-              if (assignedResources < requiredResources) {
-                throw new Error("RESOURCES_REQUIRED_FOR_CHECK_IN");
-              }
-            }
-          }
+        if (policyViolation) {
+          throw new Error(policyViolation);
         }
 
         // ───────────────────────────────────────
@@ -239,27 +157,7 @@ export async function PATCH(
 
         return {
           reservation: updatedReservation,
-
-          paymentSummary: {
-            total: fromCents(totalCents),
-
-            paid: fromCents(paidCents),
-
-            refunded: fromCents(refundedCents),
-
-            balance: fromCents(balanceCents),
-
-            isPaid: balanceCents === 0,
-
-            paymentOption: reservation.paymentOption,
-
-            requiredInitialPayment:
-              requiredInitialPaymentCents === null
-                ? null
-                : fromCents(requiredInitialPaymentCents),
-
-            initialPaymentSatisfied,
-          },
+          paymentSummary,
         };
       },
 
@@ -474,67 +372,4 @@ export async function PATCH(
       },
     );
   }
-}
-
-// ─────────────────────────────────────────────
-// RESERVATION STATE MACHINE
-// ─────────────────────────────────────────────
-
-function isTransitionAllowed(
-  currentStatus: string,
-  targetStatus: ReservationStatus,
-) {
-  const transitions: Record<string, ReservationStatus[]> = {
-    PENDING: ["CONFIRMED", "CANCELLED"],
-
-    CONFIRMED: ["CHECKED_IN", "CANCELLED", "NO_SHOW"],
-
-    CHECKED_IN: ["CHECKED_OUT"],
-
-    CHECKED_OUT: ["COMPLETED"],
-
-    CANCELLED: [],
-    NO_SHOW: [],
-    COMPLETED: [],
-  };
-
-  return transitions[currentStatus]?.includes(targetStatus) ?? false;
-}
-
-// ─────────────────────────────────────────────
-// INITIAL PAYMENT
-// ─────────────────────────────────────────────
-
-function getRequiredInitialPaymentCents(
-  totalCents: number,
-  paymentOption: "FULL" | "DEPOSIT_50" | null,
-) {
-  if (paymentOption === "FULL") {
-    return totalCents;
-  }
-
-  if (paymentOption === "DEPOSIT_50") {
-    return Math.round(totalCents / 2);
-  }
-
-  /*
-   * Reservas históricas creadas antes
-   * de PaymentOption.
-   *
-   * null significa que temporalmente no
-   * aplicamos esta nueva regla financiera.
-   */
-  return null;
-}
-
-// ─────────────────────────────────────────────
-// MONEY HELPERS
-// ─────────────────────────────────────────────
-
-function toCents(amount: number) {
-  return Math.round(amount * 100);
-}
-
-function fromCents(cents: number) {
-  return cents / 100;
 }
