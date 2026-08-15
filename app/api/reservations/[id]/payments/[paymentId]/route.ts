@@ -220,13 +220,14 @@ export async function PATCH(
                   : payment.paidAt,
 
             /*
-             * Una transferencia confirmada
-             * conserva quién la verificó.
+             * PAID conserva la información
+             * de verificación del pago.
              *
              * FAILED limpia la verificación.
              *
-             * REFUNDED conserva la verificación
-             * histórica del pago original.
+             * Los reembolsos ya no cambian el
+             * estado del Payment. Se registran
+             * mediante el modelo Refund.
              */
             verifiedAt:
               status === "PAID" && payment.method === "BANK_TRANSFER"
@@ -268,6 +269,15 @@ export async function PATCH(
         const payments = await tx.payment.findMany({
           where: {
             reservationId: reservation.id,
+          },
+
+          include: {
+            refunds: {
+              select: {
+                amount: true,
+                status: true,
+              },
+            },
           },
 
           orderBy: {

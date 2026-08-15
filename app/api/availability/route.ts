@@ -1,6 +1,7 @@
+import { isValidDateOnly, zonedDateTimeToUtc } from "@/lib/booking/datetime";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getAvailability } from "@/lib/booking/availability";
+import { getHotelAvailability } from "@/lib/booking/verticals/hotel/availability";
 
 export async function GET(request: NextRequest) {
   try {
@@ -141,10 +142,16 @@ export async function GET(request: NextRequest) {
     // CORE AVAILABILITY
     // ─────────────────────────────────────────────
 
-    const availability = await getAvailability({
+    const availability = await getHotelAvailability({
       businessId: business.id,
-      checkIn: checkInDate,
-      checkOut: checkOutDate,
+
+      startAt: checkInDate,
+
+      endAt: checkOutDate,
+
+      checkIn,
+      checkOut,
+
       adults,
       children,
     });
@@ -197,133 +204,4 @@ export async function GET(request: NextRequest) {
       },
     );
   }
-}
-
-// ─────────────────────────────────────────────
-// YYYY-MM-DD VALIDATION
-// ─────────────────────────────────────────────
-
-function isValidDateOnly(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return false;
-  }
-
-  const [year, month, day] = value.split("-").map(Number);
-
-  const date = new Date(Date.UTC(year, month - 1, day));
-
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-}
-
-// ─────────────────────────────────────────────
-// BUSINESS LOCAL DATETIME → UTC
-//
-// No dependemos de la zona horaria de Windows,
-// Node o Docker.
-//
-// Ejemplo:
-//
-// Business timezone:
-// America/El_Salvador
-//
-// 2026-08-15 15:00 local
-//
-// se convierte al instante UTC correspondiente.
-// ─────────────────────────────────────────────
-
-function zonedDateTimeToUtc(date: string, time: string, timeZone: string) {
-  const [year, month, day] = date.split("-").map(Number);
-
-  const [hour, minute] = time.split(":").map(Number);
-
-  if (
-    !Number.isInteger(hour) ||
-    !Number.isInteger(minute) ||
-    hour < 0 ||
-    hour > 23 ||
-    minute < 0 ||
-    minute > 59
-  ) {
-    throw new Error(`Horario inválido para el negocio: ${time}`);
-  }
-
-  const desiredUtcValue = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-
-  /*
-   * Partimos de una aproximación UTC y preguntamos
-   * a Intl cómo se representa ese instante dentro
-   * de la zona horaria del Business.
-   *
-   * Ajustamos la diferencia dos veces para cubrir
-   * también zonas con cambios de horario.
-   */
-  let utcValue = desiredUtcValue;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const parts = getDateTimeParts(new Date(utcValue), timeZone);
-
-    const representedAsUtc = Date.UTC(
-      parts.year,
-      parts.month - 1,
-      parts.day,
-      parts.hour,
-      parts.minute,
-      0,
-      0,
-    );
-
-    const difference = desiredUtcValue - representedAsUtc;
-
-    utcValue += difference;
-
-    if (difference === 0) {
-      break;
-    }
-  }
-
-  return new Date(utcValue);
-}
-
-// ─────────────────────────────────────────────
-// DATE PARTS IN BUSINESS TIMEZONE
-// ─────────────────────────────────────────────
-
-function getDateTimeParts(date: Date, timeZone: string) {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
-
-  const parts = formatter.formatToParts(date);
-
-  const values: Record<string, number> = {};
-
-  for (const part of parts) {
-    if (
-      part.type === "year" ||
-      part.type === "month" ||
-      part.type === "day" ||
-      part.type === "hour" ||
-      part.type === "minute"
-    ) {
-      values[part.type] = Number(part.value);
-    }
-  }
-
-  return {
-    year: values.year,
-    month: values.month,
-    day: values.day,
-    hour: values.hour,
-    minute: values.minute,
-  };
 }

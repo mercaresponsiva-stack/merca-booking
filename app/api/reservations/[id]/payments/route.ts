@@ -1,3 +1,4 @@
+import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
 import { isReservationPayable } from "@/lib/booking/reservation-state";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { fromCents, toCents } from "@/lib/booking/money";
@@ -24,6 +25,15 @@ export async function GET(
 
       include: {
         payments: {
+          include: {
+            refunds: {
+              select: {
+                amount: true,
+                status: true,
+              },
+            },
+          },
+
           orderBy: {
             createdAt: "desc",
           },
@@ -49,6 +59,12 @@ export async function GET(
       payments: reservation.payments,
     });
 
+    const financialState = calculateReservationFinancialState({
+      status: reservation.status,
+
+      paymentSummary,
+    });
+
     return NextResponse.json({
       success: true,
 
@@ -65,6 +81,8 @@ export async function GET(
       },
 
       paymentSummary,
+
+      financialState,
 
       payments: reservation.payments,
     });
@@ -160,6 +178,15 @@ export async function POST(
         const payments = await tx.payment.findMany({
           where: {
             reservationId: reservation.id,
+          },
+
+          include: {
+            refunds: {
+              select: {
+                amount: true,
+                status: true,
+              },
+            },
           },
 
           orderBy: {
@@ -307,15 +334,35 @@ export async function POST(
             throw new Error("INITIAL_DEPOSIT_ALREADY_PAID");
           }
 
-          if (paymentSummary.paid > 0) {
-            throw new Error("PARTIAL_INITIAL_PAYMENT_NOT_SUPPORTED");
-          }
-
-          if (paymentSummary.requiredInitialPayment === null) {
+          if (
+            paymentSummary.requiredInitialPayment === null ||
+            paymentSummary.initialPaymentRemaining === null
+          ) {
             throw new Error("PAYMENT_OPTION_NOT_CONFIGURED");
           }
 
-          amountCents = toCents(paymentSummary.requiredInitialPayment);
+          /*
+           * DEPOSIT_50 puede requerir más de un pago.
+           *
+           * Ejemplo:
+           *
+           * Reserva original:
+           * total = 140
+           * anticipo requerido = 70
+           * netPaid = 70
+           *
+           * Después de reprogramar:
+           * total = 225
+           * anticipo requerido = 112.50
+           *
+           * Nuevo Payment:
+           * 112.50 - 70 = 42.50
+           */
+          amountCents = toCents(paymentSummary.initialPaymentRemaining);
+
+          if (amountCents <= 0) {
+            throw new Error("INITIAL_DEPOSIT_ALREADY_PAID");
+          }
         }
 
         // ─────────────────────────────────────
@@ -369,6 +416,15 @@ export async function POST(
     const updatedPayments = await prisma.payment.findMany({
       where: {
         reservationId: result.reservation.id,
+      },
+
+      include: {
+        refunds: {
+          select: {
+            amount: true,
+            status: true,
+          },
+        },
       },
 
       orderBy: {
@@ -499,22 +555,6 @@ export async function POST(
           success: false,
           error:
             "El anticipo del 50% ya fue pagado. El saldo restante se paga en efectivo durante el check-in.",
-        },
-        {
-          status: 409,
-        },
-      );
-    }
-
-    if (
-      error instanceof Error &&
-      error.message === "PARTIAL_INITIAL_PAYMENT_NOT_SUPPORTED"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "La reserva contiene un pago parcial incompatible con la modalidad de anticipo del 50%",
         },
         {
           status: 409,

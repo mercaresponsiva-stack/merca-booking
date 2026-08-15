@@ -67,7 +67,16 @@ export async function PATCH(
               },
             },
 
-            payments: true,
+            payments: {
+              include: {
+                refunds: {
+                  select: {
+                    amount: true,
+                    status: true,
+                  },
+                },
+              },
+            },
           },
         });
 
@@ -150,8 +159,6 @@ export async function PATCH(
                 },
               },
             },
-
-            payments: true,
           },
         });
 

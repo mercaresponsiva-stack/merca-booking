@@ -10,109 +10,146 @@ import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
 
 import { prisma } from "@/lib/prisma";
 
-type AvailabilityInput = {
+/*
+ * Solo declaramos las partes de Prisma
+ * que necesita este Core.
+ *
+ * Esto permite utilizar:
+ *
+ * - prisma global
+ * - TransactionClient
+ *
+ * sin acoplar Availability a una ruta HTTP.
+ */
+export type BookingAvailabilityDb = Pick<
+  typeof prisma,
+  "service" | "reservationService" | "block"
+>;
+
+export type AvailabilityInput = {
   businessId: string;
-  checkIn: Date;
-  checkOut: Date;
-  adults: number;
-  children: number;
+
+  startAt: Date;
+  endAt: Date;
+
+  /*
+   * Permite consultar uno o varios
+   * Services específicos.
+   *
+   * Si se omite, se evalúan todos
+   * los Services activos del Business.
+   */
+  serviceIds?: string[];
+
+  /*
+   * Fundamental para reprogramación.
+   *
+   * La reserva que estamos moviendo
+   * no debe contarse como demanda
+   * contra sí misma.
+   */
+  excludeReservationId?: string;
+
+  /*
+   * Por defecto usa prisma.
+   *
+   * Durante operaciones críticas,
+   * como reschedule, podremos pasar
+   * el TransactionClient.
+   */
+  db?: BookingAvailabilityDb;
 };
 
-type ResourceTypeAvailability = {
+export type ResourceTypeAvailability = {
   resourceTypeId: string;
+
   name: string;
+
   requiredQuantity: number;
+
   totalResources: number;
+
   assignedResources: number;
+
   blockedResources: number;
+
   unassignedResourceDemand: number;
+
   availableUnits: number;
 };
 
-type AvailabilityResult = {
+export type ServiceAvailability = {
   serviceId: string;
+
   name: string;
   slug: string;
-  description: string | null;
 
-  maxPeople: number;
-  maxAdults: number | null;
-  maxChildren: number | null;
+  description: string | null;
 
   available: number;
 
   resourceTypes: ResourceTypeAvailability[];
-
-  pricing: {
-    nightlyPrices: number[];
-    total: number;
-  };
-
-  total: number;
 };
 
 export async function getAvailability({
   businessId,
-  checkIn,
-  checkOut,
-  adults,
-  children,
+  startAt,
+  endAt,
+  serviceIds,
+  excludeReservationId,
+  db = prisma,
 }: AvailabilityInput) {
-  const totalGuests = adults + children;
+  if (endAt <= startAt) {
+    throw new Error("INVALID_AVAILABILITY_INTERVAL");
+  }
 
-  if (checkOut <= checkIn) {
-    throw new Error(
-      "La fecha de salida debe ser posterior a la fecha de entrada.",
-    );
+  /*
+   * Una lista explícitamente vacía
+   * significa que no hay Services
+   * que evaluar.
+   */
+  if (serviceIds && serviceIds.length === 0) {
+    return {
+      businessId,
+
+      startAt,
+      endAt,
+
+      services: [] as ServiceAvailability[],
+    };
   }
 
   // ─────────────────────────────────────────────
   // SERVICES
   //
-  // Para hotel:
-  // Service = Habitación Standard / Deluxe / Suite
+  // Core no pregunta:
   //
-  // Cada Service indica qué ResourceType necesita mediante
-  // ServiceResourceType.
+  // - adultos
+  // - niños
+  // - noches
+  // - tarifas
+  // - tipo de negocio
+  //
+  // Solo necesita conocer los recursos
+  // requeridos por cada Service.
   // ─────────────────────────────────────────────
 
-  const services = await prisma.service.findMany({
+  const services = await db.service.findMany({
     where: {
       businessId,
+
       isActive: true,
 
-      maxPeople: {
-        gte: totalGuests,
-      },
-
-      maxAdults: {
-        gte: adults,
-      },
-
-      maxChildren: {
-        gte: children,
-      },
+      ...(serviceIds
+        ? {
+            id: {
+              in: serviceIds,
+            },
+          }
+        : {}),
     },
 
     include: {
-      rates: {
-        where: {
-          isActive: true,
-
-          startDate: {
-            lte: checkOut,
-          },
-
-          endDate: {
-            gte: checkIn,
-          },
-        },
-
-        orderBy: {
-          startDate: "desc",
-        },
-      },
-
       resourceTypes: {
         include: {
           resourceType: {
@@ -137,38 +174,32 @@ export async function getAvailability({
     },
   });
 
-  const results: AvailabilityResult[] = [];
+  const results: ServiceAvailability[] = [];
 
   // ─────────────────────────────────────────────
-  // EVALUATE EACH SERVICE
+  // EACH SERVICE
   // ─────────────────────────────────────────────
 
   for (const service of services) {
+    /*
+     * Este módulo calcula disponibilidad
+     * basada en recursos físicos.
+     *
+     * Services sin ResourceType podrán
+     * tener otra estrategia de disponibilidad
+     * cuando integremos Schedule /
+     * AvailabilityRule.
+     */
     if (service.resourceTypes.length === 0) {
       continue;
     }
 
     // ───────────────────────────────────────────
-    // OVERLAPPING RESERVATIONS
-    //
-    // Importante:
-    //
-    // No contamos solamente ReservationResource.
-    //
-    // ReservationService representa la demanda real.
-    // Esto permite que una reserva SIN recurso físico
-    // asignado siga consumiendo disponibilidad.
-    //
-    // Ejemplo actual:
-    //
-    // Juan  → Standard → 101
-    // Maria → Standard → sin Resource
-    //
-    // Ambos consumen una habitación.
+    // OVERLAPPING DEMAND
     // ───────────────────────────────────────────
 
-    const overlappingReservationServices =
-      await prisma.reservationService.findMany({
+    const overlappingReservationServices = await db.reservationService.findMany(
+      {
         where: {
           serviceId: service.id,
 
@@ -179,12 +210,21 @@ export async function getAvailability({
               in: [...ACTIVE_RESERVATION_STATUSES],
             },
 
-            ...getOverlapWhere(checkIn, checkOut),
+            ...getOverlapWhere(startAt, endAt),
+
+            ...(excludeReservationId
+              ? {
+                  id: {
+                    not: excludeReservationId,
+                  },
+                }
+              : {}),
           },
         },
 
         select: {
           id: true,
+
           quantity: true,
 
           resources: {
@@ -199,24 +239,18 @@ export async function getAvailability({
             },
           },
         },
-      });
+      },
+    );
 
     // ───────────────────────────────────────────
     // BLOCKS
-    //
-    // Puede existir:
-    //
-    // business completo
-    // service completo
-    // resourceType completo
-    // resource específico
     // ───────────────────────────────────────────
 
-    const blocks = await prisma.block.findMany({
+    const blocks = await db.block.findMany({
       where: {
         businessId,
 
-        ...getOverlapWhere(checkIn, checkOut),
+        ...getOverlapWhere(startAt, endAt),
 
         OR: [
           {
@@ -228,9 +262,10 @@ export async function getAvailability({
           },
 
           /*
-           * Un Resource físico bloqueado
-           * debe respetarse aunque el Block
-           * conserve un serviceId.
+           * Un Resource físico
+           * bloqueado debe respetarse
+           * independientemente del
+           * Service asociado al Block.
            */
           {
             resourceId: {
@@ -242,51 +277,38 @@ export async function getAvailability({
 
       select: {
         serviceId: true,
+
         resourceTypeId: true,
+
         resourceId: true,
       },
     });
 
     // ───────────────────────────────────────────
-    // BUSINESS-WIDE BLOCK
+    // BUSINESS BLOCK
     // ───────────────────────────────────────────
 
-    const businessBlocked = isBusinessBlocked(blocks);
-
-    if (businessBlocked) {
+    if (isBusinessBlocked(blocks)) {
       continue;
     }
 
     // ───────────────────────────────────────────
-    // SERVICE-WIDE BLOCK
+    // SERVICE BLOCK
     // ───────────────────────────────────────────
 
-    const serviceBlocked = isServiceBlocked(blocks, service.id);
-
-    if (serviceBlocked) {
+    if (isServiceBlocked(blocks, service.id)) {
       continue;
     }
 
     // ───────────────────────────────────────────
     // RESOURCE REQUIREMENTS
-    //
-    // Para el hotel normalmente será:
-    //
-    // Standard Service
-    //   requires 1
-    // Standard ResourceType
-    //
-    // Pero esta lógica también permite en el futuro:
-    //
-    // Consulta
-    //   requires 1 doctor
-    //   requires 1 consultorio
     // ───────────────────────────────────────────
 
     const resourceAvailability: ResourceTypeAvailability[] = [];
 
     for (const requirement of service.resourceTypes) {
       const resourceType = requirement.resourceType;
+
       const resources = resourceType.resources;
 
       const requiredQuantity = Math.max(requirement.requiredQuantity, 1);
@@ -296,12 +318,19 @@ export async function getAvailability({
       if (totalResources === 0) {
         resourceAvailability.push({
           resourceTypeId: resourceType.id,
+
           name: resourceType.name,
+
           requiredQuantity,
+
           totalResources: 0,
+
           assignedResources: 0,
+
           blockedResources: 0,
+
           unassignedResourceDemand: 0,
+
           availableUnits: 0,
         });
 
@@ -312,9 +341,6 @@ export async function getAvailability({
 
       // ─────────────────────────────────────────
       // ASSIGNED RESOURCES
-      //
-      // Recursos físicos ya ligados a reservas
-      // superpuestas.
       // ─────────────────────────────────────────
 
       const assignedResourceIds = new Set<string>();
@@ -332,12 +358,6 @@ export async function getAvailability({
 
       // ─────────────────────────────────────────
       // UNASSIGNED DEMAND
-      //
-      // Una ReservationService puede consumir
-      // disponibilidad aunque todavía no tenga
-      // ReservationResource.
-      //
-      // Esto protege contra overbooking.
       // ─────────────────────────────────────────
 
       let unassignedResourceDemand = 0;
@@ -353,6 +373,7 @@ export async function getAvailability({
 
         const missingResources = Math.max(
           requiredForReservation - assignedForThisType,
+
           0,
         );
 
@@ -361,31 +382,24 @@ export async function getAvailability({
 
       // ─────────────────────────────────────────
       // RESOURCE TYPE BLOCK
-      //
-      // Ejemplo:
-      //
-      // resourceType = Standard
-      // resource = null
-      //
-      // significa que Standard completo está
-      // bloqueado.
       // ─────────────────────────────────────────
 
-      const resourceTypeBlocked = isResourceTypeBlocked(
-        blocks,
-        service.id,
-        resourceType.id,
-      );
-
-      if (resourceTypeBlocked) {
+      if (isResourceTypeBlocked(blocks, service.id, resourceType.id)) {
         resourceAvailability.push({
           resourceTypeId: resourceType.id,
+
           name: resourceType.name,
+
           requiredQuantity,
+
           totalResources,
+
           assignedResources: assignedResourceIds.size,
+
           blockedResources: totalResources,
+
           unassignedResourceDemand,
+
           availableUnits: 0,
         });
 
@@ -393,21 +407,13 @@ export async function getAvailability({
       }
 
       // ─────────────────────────────────────────
-      // SPECIFIC RESOURCE BLOCKS
-      //
-      // Ejemplo:
-      //
-      // Resource 101 bloqueado.
+      // RESOURCE BLOCKS
       // ─────────────────────────────────────────
 
       const blockedResourceIds = getBlockedResourceIds(blocks, resourceIds);
 
       // ─────────────────────────────────────────
       // PHYSICALLY FREE RESOURCES
-      //
-      // No asignados
-      // y
-      // no bloqueados.
       // ─────────────────────────────────────────
 
       const physicallyFreeResources = resources.filter(
@@ -416,30 +422,41 @@ export async function getAvailability({
           !blockedResourceIds.has(resource.id),
       );
 
-      // Las reservas sin Resource asignado deben
-      // apartar inventario antes de ofrecerlo a
-      // nuevas reservas.
-
-      const physicalResourcesAfterUnassignedDemand = Math.max(
+      /*
+       * Una ReservationService todavía
+       * sin Resource asignado sigue
+       * consumiendo inventario.
+       */
+      const resourcesAfterDemand = Math.max(
         physicallyFreeResources.length - unassignedResourceDemand,
+
         0,
       );
 
-      // Una unidad del servicio podría requerir
-      // más de un recurso de este tipo.
-
+      /*
+       * Un Service podría requerir
+       * más de una unidad del mismo
+       * ResourceType.
+       */
       const availableUnits = Math.floor(
-        physicalResourcesAfterUnassignedDemand / requiredQuantity,
+        resourcesAfterDemand / requiredQuantity,
       );
 
       resourceAvailability.push({
         resourceTypeId: resourceType.id,
+
         name: resourceType.name,
+
         requiredQuantity,
+
         totalResources,
+
         assignedResources: assignedResourceIds.size,
+
         blockedResources: blockedResourceIds.size,
+
         unassignedResourceDemand,
+
         availableUnits,
       });
     }
@@ -447,9 +464,9 @@ export async function getAvailability({
     // ───────────────────────────────────────────
     // SERVICE AVAILABILITY
     //
-    // Si un servicio requiere más de un tipo de
-    // recurso, la capacidad está limitada por el
-    // recurso más escaso.
+    // Si requiere varios ResourceTypes,
+    // el recurso más escaso determina
+    // cuántas unidades pueden venderse.
     // ───────────────────────────────────────────
 
     const available = Math.min(
@@ -462,114 +479,27 @@ export async function getAvailability({
       continue;
     }
 
-    // ───────────────────────────────────────────
-    // HOTEL PRICING
-    //
-    // Por ahora mantenemos la lógica nocturna
-    // porque el hotel es nuestra primera vertical.
-    // ───────────────────────────────────────────
-
-    const nights = calculateNights(checkIn, checkOut);
-
-    const pricing = calculatePrice(checkIn, nights, service.rates);
-
     results.push({
       serviceId: service.id,
 
       name: service.name,
-      slug: service.slug,
-      description: service.description,
 
-      maxPeople: service.maxPeople,
-      maxAdults: service.maxAdults,
-      maxChildren: service.maxChildren,
+      slug: service.slug,
+
+      description: service.description,
 
       available,
 
       resourceTypes: resourceAvailability,
-
-      pricing,
-      total: pricing.total,
     });
   }
 
   return {
     businessId,
 
-    checkIn,
-    checkOut,
-
-    adults,
-    children,
-    totalGuests,
-
-    nights: calculateNights(checkIn, checkOut),
+    startAt,
+    endAt,
 
     services: results,
-  };
-}
-
-// ─────────────────────────────────────────────
-// HOTEL: NUMBER OF NIGHTS
-// ─────────────────────────────────────────────
-
-function calculateNights(checkIn: Date, checkOut: Date) {
-  const millisecondsPerDay = 1000 * 60 * 60 * 24;
-
-  return Math.ceil(
-    (checkOut.getTime() - checkIn.getTime()) / millisecondsPerDay,
-  );
-}
-
-// ─────────────────────────────────────────────
-// HOTEL: WEEKDAY / WEEKEND PRICING
-// ─────────────────────────────────────────────
-
-function calculatePrice(
-  checkIn: Date,
-  nights: number,
-  rates: Array<{
-    startDate: Date;
-    endDate: Date;
-    weekdayPrice: unknown;
-    weekendPrice: unknown;
-  }>,
-) {
-  let total = 0;
-
-  const nightlyPrices: number[] = [];
-
-  for (let i = 0; i < nights; i++) {
-    const date = new Date(checkIn);
-
-    // UTC para que el resultado no dependa de la
-    // zona horaria del proceso Node.
-    date.setUTCDate(date.getUTCDate() + i);
-
-    const day = date.getUTCDay();
-
-    const isWeekend = day === 0 || day === 6;
-
-    const rate = rates.find(
-      (currentRate) =>
-        date >= currentRate.startDate && date <= currentRate.endDate,
-    );
-
-    if (!rate) {
-      throw new Error(
-        `No existe una tarifa para la fecha ${date.toISOString()}`,
-      );
-    }
-
-    const price = Number(isWeekend ? rate.weekendPrice : rate.weekdayPrice);
-
-    nightlyPrices.push(price);
-
-    total += price;
-  }
-
-  return {
-    nightlyPrices,
-    total,
   };
 }

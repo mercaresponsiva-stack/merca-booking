@@ -52,6 +52,11 @@ model Business {
   blocks       Block[]
   users        User[]
 
+  refundPolicies     RefundPolicy[]
+  cancellations      Cancellation[]
+  refunds            Refund[]
+  reservationChanges ReservationChange[]
+
   @@index([businessTypeId])
 }
 
@@ -426,6 +431,14 @@ model Reservation {
   resources ReservationResource[]
   payments  Payment[]
 
+  cancellation Cancellation?
+
+  retractoEligible Boolean @default(false)
+
+  refunds Refund[]
+
+  changes ReservationChange[]
+
   @@index([businessId, startAt, endAt])
   @@index([customerId])
   @@index([status])
@@ -509,6 +522,8 @@ model Payment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  refunds Refund[]
+
   business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
   reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
   verifiedBy  User?       @relation("PaymentVerifiedBy", fields: [verifiedById], references: [id], onDelete: SetNull)
@@ -573,8 +588,204 @@ model User {
 
   verifiedPayments Payment[] @relation("PaymentVerifiedBy")
 
+  processedRefunds Refund[] @relation("RefundProcessedBy")
+
+  createdCancellations Cancellation[] @relation("CancellationCreatedBy")
+
+  reservationChanges ReservationChange[] @relation("ReservationChangeChangedBy")
+
   @@unique([businessId, email])
   @@index([businessId])
+}
+
+// ─────────────────────────────────────────────
+// REFUND
+// ─────────────────────────────────────────────
+
+model RefundPolicy {
+  id         String @id @default(cuid())
+  businessId String
+
+  name String
+
+  fullRefundDays Int @default(8)
+
+  annualAdministrativeRate Decimal @db.Decimal(8, 6)
+
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  refunds Refund[]
+
+  @@index([businessId])
+  @@index([businessId, isActive])
+  @@index([effectiveFrom])
+}
+
+model Cancellation {
+  id            String @id @default(cuid())
+  businessId    String
+  reservationId String @unique
+
+  type CancellationType
+
+  reason String?
+
+  requestedAt DateTime @default(now())
+  cancelledAt DateTime @default(now())
+
+  createdById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  createdBy User? @relation("CancellationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  refunds Refund[]
+
+  @@index([businessId])
+  @@index([createdById])
+  @@index([type])
+}
+
+model Refund {
+  id            String @id @default(cuid())
+  businessId    String
+  reservationId String
+  paymentId     String
+
+  cancellationId      String?
+  reservationChangeId String?
+  refundPolicyId      String?
+
+  basis RefundBasis
+
+  // Cantidad sobre la que se calcula
+  // este reembolso.
+  baseAmount Decimal @db.Decimal(10, 2)
+
+  // Snapshot de la política utilizada.
+  fullRefundDays Int?
+
+  annualAdministrativeRate Decimal? @db.Decimal(8, 6)
+
+  // Días desde la celebración del contrato
+  // hasta la solicitud de cancelación.
+  //
+  // Se utiliza para determinar si todavía
+  // estamos dentro del período de retracto.
+  contractElapsedDays Int?
+
+  // Días desde este Payment concreto
+  // hasta la solicitud de cancelación.
+  //
+  // Se utiliza para calcular el máximo
+  // de retención administrativa.
+  paymentElapsedDays Int?
+
+  // Máximo permitido según la regla aplicada.
+  maxAdministrativeRetention Decimal @default(0) @db.Decimal(10, 2)
+
+  // Lo que efectivamente se decidió retener.
+  administrativeRetention Decimal @default(0) @db.Decimal(10, 2)
+
+  // Dinero realmente a devolver.
+  amount Decimal @db.Decimal(10, 2)
+
+  status RefundStatus @default(PENDING)
+
+  reason String?
+
+  requestedAt DateTime @default(now())
+
+  processedAt DateTime?
+
+  processedById String?
+
+  externalReference String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  cancellation Cancellation? @relation(fields: [cancellationId], references: [id], onDelete: SetNull)
+
+  reservationChange ReservationChange? @relation(fields: [reservationChangeId], references: [id], onDelete: SetNull)
+
+  refundPolicy RefundPolicy? @relation(fields: [refundPolicyId], references: [id], onDelete: SetNull)
+
+  processedBy User? @relation("RefundProcessedBy", fields: [processedById], references: [id], onDelete: SetNull)
+
+  @@index([businessId])
+  @@index([reservationId])
+  @@index([paymentId])
+  @@index([cancellationId])
+  @@index([reservationChangeId])
+  @@index([refundPolicyId])
+  @@index([processedById])
+  @@index([status])
+  @@index([basis])
+}
+
+model ReservationChange {
+  id            String @id @default(cuid())
+  businessId    String
+  reservationId String
+
+  type ReservationChangeType
+
+  changedById String?
+
+  reason String?
+
+  oldStartAt DateTime?
+  newStartAt DateTime?
+
+  oldEndAt DateTime?
+  newEndAt DateTime?
+
+  oldSubtotal Decimal? @db.Decimal(10, 2)
+  newSubtotal Decimal? @db.Decimal(10, 2)
+
+  oldTotal Decimal? @db.Decimal(10, 2)
+  newTotal Decimal? @db.Decimal(10, 2)
+
+  oldStatus ReservationStatus?
+  newStatus ReservationStatus?
+
+  details Json?
+
+  createdAt DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  changedBy User? @relation("ReservationChangeChangedBy", fields: [changedById], references: [id], onDelete: SetNull)
+
+  refunds Refund[]
+
+  @@index([businessId])
+  @@index([reservationId])
+  @@index([changedById])
+  @@index([type])
+  @@index([createdAt])
 }
 
 // ─────────────────────────────────────────────
@@ -624,4 +835,34 @@ enum UserRole {
   OWNER
   ADMIN
   RECEPTIONIST
+}
+
+enum CancellationType {
+  RETRACTO
+  DESISTIMIENTO
+  PROVIDER_CANCELLATION
+  OTHER
+}
+
+enum RefundBasis {
+  RETRACTO
+  DESISTIMIENTO
+  PROVIDER_CANCELLATION
+  PRICE_ADJUSTMENT
+  MANUAL
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ReservationChangeType {
+  RESCHEDULE
+  RESOURCE_CHANGE
+  PRICE_ADJUSTMENT
+  MANUAL
 }

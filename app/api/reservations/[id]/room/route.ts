@@ -1,12 +1,6 @@
-import {
-  getOverlapWhere,
-  isResourceBlocked,
-} from "@/lib/booking/resource-availability";
+import { checkResourceForInterval } from "@/lib/booking/resource-interval-check";
 
-import {
-  ACTIVE_RESERVATION_STATUSES,
-  isReservationActive,
-} from "@/lib/booking/reservation-state";
+import { isReservationActive } from "@/lib/booking/reservation-state";
 import {
   isResourceRequirementSatisfied,
   resolveReservationServiceForResource,
@@ -193,99 +187,43 @@ export async function PATCH(
           throw new Error("RESOURCE_REQUIREMENT_ALREADY_SATISFIED");
         }
 
-        // ─────────────────────────────────────────
-        // 8. VERIFICAR QUE EL RESOURCE NO ESTÉ
-        //    ASIGNADO A OTRA RESERVA SUPERPUESTA
+        // ─────────────────────────────────────────────
+        // 8. RESOURCE AVAILABLE FOR INTERVAL
         //
-        // overlap:
+        // La misma regla universal es utilizada por:
         //
-        // existing.startAt < requested.endAt
-        // &&
-        // existing.endAt > requested.startAt
-        // ─────────────────────────────────────────
-
-        const overlappingAssignment = await tx.reservationResource.findFirst({
-          where: {
-            resourceId: resource.id,
-
-            reservationId: {
-              not: reservation.id,
-            },
-
-            reservation: {
-              status: {
-                in: [...ACTIVE_RESERVATION_STATUSES],
-              },
-
-              ...getOverlapWhere(reservation.startAt, reservation.endAt),
-            },
-          },
-
-          select: {
-            id: true,
-
-            reservation: {
-              select: {
-                id: true,
-                confirmationCode: true,
-              },
-            },
-          },
-        });
-
-        if (overlappingAssignment) {
-          throw new Error("RESOURCE_ALREADY_OCCUPIED");
-        }
-
-        // ─────────────────────────────────────────
-        // 9. BLOCKS
+        // - asignación normal
+        // - futuras reprogramaciones
         //
-        // Comprobamos:
+        // Comprueba:
         //
-        // Business completo
-        // Service completo
-        // ResourceType completo
-        // Resource específico
-        // ─────────────────────────────────────────
+        // - otra reserva activa usando el Resource
+        // - Block del Business
+        // - Block del Service
+        // - Block del ResourceType
+        // - Block del Resource específico
+        // ─────────────────────────────────────────────
 
-        const blocks = await tx.block.findMany({
-          where: {
-            businessId: reservation.businessId,
+        const intervalCheck = await checkResourceForInterval({
+          businessId: reservation.businessId,
 
-            ...getOverlapWhere(reservation.startAt, reservation.endAt),
+          reservationId: reservation.id,
 
-            OR: [
-              {
-                serviceId: null,
-              },
-
-              {
-                serviceId: reservationService.serviceId,
-              },
-
-              {
-                resourceId: resource.id,
-              },
-            ],
-          },
-
-          select: {
-            serviceId: true,
-            resourceTypeId: true,
-            resourceId: true,
-          },
-        });
-
-        const resourceBlocked = isResourceBlocked(blocks, {
           serviceId: reservationService.serviceId,
 
           resourceTypeId: resource.resourceTypeId,
 
           resourceId: resource.id,
+
+          startAt: reservation.startAt,
+
+          endAt: reservation.endAt,
+
+          db: tx,
         });
 
-        if (resourceBlocked) {
-          throw new Error("RESOURCE_BLOCKED");
+        if (!intervalCheck.available) {
+          throw new Error(intervalCheck.reason);
         }
 
         // ─────────────────────────────────────────
