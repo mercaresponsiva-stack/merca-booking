@@ -7,19 +7,512 @@ import {
   isResourceTypeBlocked,
   isServiceBlocked,
 } from "@/lib/booking/resource-availability";
-import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
+import {
+  ACTIVE_RESERVATION_STATUSES,
+  isReservationStatus,
+  type ReservationStatus,
+} from "@/lib/booking/reservation-state";
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
+import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
 
 const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
 
 type PaymentOption = (typeof PAYMENT_OPTIONS)[number];
 
+function addDaysToDateOnly(dateOnly: string, days: number) {
+  const date = new Date(`${dateOnly}T00:00:00.000Z`);
+
+  date.setUTCDate(date.getUTCDate() + days);
+
+  return date.toISOString().slice(0, 10);
+}
+
 function generateConfirmationCode() {
   const random = randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase();
 
   return `MB-${random}`;
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = request.nextUrl;
+
+    // ─────────────────────────────────────────────
+    // QUERY PARAMS
+    // ─────────────────────────────────────────────
+
+    const businessId = searchParams.get("businessId")?.trim() ?? "";
+
+    const rawStatus = searchParams.get("status")?.trim() ?? "";
+
+    let status: ReservationStatus | undefined;
+
+    const from = searchParams.get("from")?.trim() ?? "";
+
+    const to = searchParams.get("to")?.trim() ?? "";
+
+    const confirmationCode = searchParams.get("confirmationCode")?.trim() ?? "";
+
+    const customer = searchParams.get("customer")?.trim() ?? "";
+
+    const rawPage = Number(searchParams.get("page") ?? 1);
+
+    const rawPageSize = Number(searchParams.get("pageSize") ?? 20);
+
+    // ─────────────────────────────────────────────
+    // VALIDATION
+    // ─────────────────────────────────────────────
+
+    if (!businessId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "businessId es obligatorio",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (rawStatus) {
+      if (!isReservationStatus(rawStatus)) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Estado de reserva inválido",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      status = rawStatus;
+    }
+
+    if (from && !isValidDateOnly(from)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "El parámetro from debe usar formato YYYY-MM-DD",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (to && !isValidDateOnly(to)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "El parámetro to debe usar formato YYYY-MM-DD",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (from && to && from > to) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "from no puede ser posterior a to",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!Number.isInteger(rawPage) || rawPage < 1) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "page debe ser un entero mayor o igual a 1",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (
+      !Number.isInteger(rawPageSize) ||
+      rawPageSize < 1 ||
+      rawPageSize > 100
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "pageSize debe ser un entero entre 1 y 100",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // BUSINESS
+    // ─────────────────────────────────────────────
+
+    const business = await prisma.business.findUnique({
+      where: {
+        id: businessId,
+      },
+
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        timezone: true,
+        currency: true,
+      },
+    });
+
+    if (!business) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Negocio no encontrado",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // DATE RANGE
+    //
+    // from = inicio inclusivo
+    // to   = día final inclusivo
+    //
+    // Internamente convertimos "to" al inicio
+    // del día siguiente para trabajar con:
+    //
+    // reservation.startAt < rangeEnd
+    // reservation.endAt   > rangeStart
+    //
+    // que es la regla universal de solapamiento.
+    // ─────────────────────────────────────────────
+
+    const rangeStart = from
+      ? zonedDateTimeToUtc(from, "00:00", business.timezone)
+      : null;
+
+    const rangeEnd = to
+      ? zonedDateTimeToUtc(addDaysToDateOnly(to, 1), "00:00", business.timezone)
+      : null;
+
+    const dateConditions = [];
+
+    if (rangeStart) {
+      dateConditions.push({
+        endAt: {
+          gt: rangeStart,
+        },
+      });
+    }
+
+    if (rangeEnd) {
+      dateConditions.push({
+        startAt: {
+          lt: rangeEnd,
+        },
+      });
+    }
+
+    // ─────────────────────────────────────────────
+    // FILTERS
+    // ─────────────────────────────────────────────
+
+    const where = {
+      businessId,
+
+      ...(status
+        ? {
+            status,
+          }
+        : {}),
+
+      ...(confirmationCode
+        ? {
+            confirmationCode: {
+              contains: confirmationCode,
+              mode: "insensitive" as const,
+            },
+          }
+        : {}),
+
+      ...(customer
+        ? {
+            customer: {
+              OR: [
+                {
+                  firstName: {
+                    contains: customer,
+                    mode: "insensitive" as const,
+                  },
+                },
+                {
+                  lastName: {
+                    contains: customer,
+                    mode: "insensitive" as const,
+                  },
+                },
+                {
+                  email: {
+                    contains: customer,
+                    mode: "insensitive" as const,
+                  },
+                },
+                {
+                  phone: {
+                    contains: customer,
+                    mode: "insensitive" as const,
+                  },
+                },
+              ],
+            },
+          }
+        : {}),
+
+      ...(dateConditions.length > 0
+        ? {
+            AND: dateConditions,
+          }
+        : {}),
+    };
+
+    // ─────────────────────────────────────────────
+    // PAGINATION
+    // ─────────────────────────────────────────────
+
+    const page = rawPage;
+
+    const pageSize = rawPageSize;
+
+    const skip = (page - 1) * pageSize;
+
+    // ─────────────────────────────────────────────
+    // QUERY
+    // ─────────────────────────────────────────────
+
+    const [totalItems, reservations] = await prisma.$transaction([
+      prisma.reservation.count({
+        where,
+      }),
+
+      prisma.reservation.findMany({
+        where,
+
+        skip,
+
+        take: pageSize,
+
+        orderBy: [
+          {
+            startAt: "asc",
+          },
+          {
+            createdAt: "desc",
+          },
+        ],
+
+        include: {
+          customer: true,
+
+          services: {
+            include: {
+              service: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
+              },
+
+              resources: {
+                include: {
+                  resource: {
+                    select: {
+                      id: true,
+                      name: true,
+                      code: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+
+          payments: {
+            include: {
+              refunds: true,
+            },
+
+            orderBy: {
+              createdAt: "asc",
+            },
+          },
+        },
+      }),
+    ]);
+
+    // ─────────────────────────────────────────────
+    // RESPONSE ROWS
+    // ─────────────────────────────────────────────
+
+    const items = reservations.map((reservation) => {
+      const paymentSummary = calculatePaymentSummary({
+        total: Number(reservation.total),
+
+        paymentOption: reservation.paymentOption,
+
+        payments: reservation.payments,
+      });
+
+      const financialState = calculateReservationFinancialState({
+        status: reservation.status,
+
+        paymentSummary,
+      });
+
+      return {
+        id: reservation.id,
+
+        confirmationCode: reservation.confirmationCode,
+
+        status: reservation.status,
+
+        source: reservation.source,
+
+        startAt: reservation.startAt,
+
+        endAt: reservation.endAt,
+
+        guests: reservation.guests,
+
+        adults: reservation.adults,
+
+        children: reservation.children,
+
+        total: Number(reservation.total),
+
+        paymentOption: reservation.paymentOption,
+
+        customer: {
+          id: reservation.customer.id,
+
+          firstName: reservation.customer.firstName,
+
+          lastName: reservation.customer.lastName,
+
+          email: reservation.customer.email,
+
+          phone: reservation.customer.phone,
+        },
+
+        services: reservation.services.map((item) => ({
+          id: item.id,
+
+          serviceId: item.serviceId,
+
+          name: item.service.name,
+
+          slug: item.service.slug,
+
+          quantity: item.quantity,
+
+          subtotal: Number(item.subtotal),
+
+          resources: item.resources.map((assignment) => ({
+            assignmentId: assignment.id,
+
+            resourceId: assignment.resourceId,
+
+            name: assignment.resource.name,
+
+            code: assignment.resource.code,
+          })),
+        })),
+
+        financial: {
+          grossPaid: paymentSummary.grossPaid,
+
+          refunded: paymentSummary.refunded,
+
+          refundPending: paymentSummary.refundPending,
+
+          netPaid: paymentSummary.netPaid,
+
+          contractualBalance: financialState.contractualBalance,
+
+          amountDue: financialState.amountDue,
+
+          canAcceptPayment: financialState.canAcceptPayment,
+
+          hasRefundPending: financialState.hasRefundPending,
+        },
+
+        createdAt: reservation.createdAt,
+
+        updatedAt: reservation.updatedAt,
+      };
+    });
+
+    const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
+
+    return NextResponse.json({
+      success: true,
+
+      business,
+
+      filters: {
+        status: status || null,
+
+        from: from || null,
+
+        to: to || null,
+
+        confirmationCode: confirmationCode || null,
+
+        customer: customer || null,
+      },
+
+      pagination: {
+        page,
+        pageSize,
+        totalItems,
+        totalPages,
+
+        hasPreviousPage: page > 1,
+
+        hasNextPage: page < totalPages,
+      },
+
+      items,
+    });
+  } catch (error) {
+    console.error("GET /api/reservations error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "No fue posible obtener las reservas",
+      },
+      {
+        status: 500,
+      },
+    );
+  }
 }
 
 export async function POST(request: NextRequest) {
