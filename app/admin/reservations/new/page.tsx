@@ -16,17 +16,28 @@ type ReservationSource =
   | "AIRBNB"
   | "OTHER";
 
+type CustomerMode = "EXISTING" | "NEW";
+
 type Service = {
   id: string;
   name: string;
   slug: string;
   description: string | null;
-
   durationMinutes: number | null;
-
   maxPeople: number;
   maxAdults: number | null;
   maxChildren: number | null;
+};
+
+type Customer = {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  reservationCount: number;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type ServicesResponse = {
@@ -40,6 +51,12 @@ type ServicesResponse = {
   services: Service[];
 };
 
+type CustomersResponse = {
+  success: true;
+
+  customers: Customer[];
+};
+
 type CreateReservationResponse = {
   success: true;
 
@@ -47,23 +64,6 @@ type CreateReservationResponse = {
     id: string;
     confirmationCode: string;
     status: string;
-
-    businessId: string;
-
-    startAt: string;
-    endAt: string;
-
-    checkIn: string;
-    checkOut: string;
-
-    guests: number;
-    adults: number;
-    children: number;
-
-    subtotal: number | string;
-    total: number | string;
-
-    paymentOption: PaymentOption;
   };
 };
 
@@ -133,10 +133,28 @@ function getSourceLabel(source: ReservationSource) {
   }
 }
 
+function getCustomerName(customer: Customer) {
+  return `${customer.firstName} ${customer.lastName}`;
+}
+
 export default function NewReservationPage() {
   const router = useRouter();
 
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
+
+  const [customerMode, setCustomerMode] = useState<CustomerMode>("EXISTING");
+
+  const [customerQuery, setCustomerQuery] = useState("");
+
+  const [customerResults, setCustomerResults] = useState<Customer[]>([]);
+
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
+    null,
+  );
+
+  const [customerLoading, setCustomerLoading] = useState(false);
+
+  const [customerError, setCustomerError] = useState<string | null>(null);
 
   const [services, setServices] = useState<Service[]>([]);
 
@@ -197,6 +215,76 @@ export default function NewReservationPage() {
     void loadServices();
   }, [loadServices]);
 
+  useEffect(() => {
+    if (customerMode !== "EXISTING") {
+      return;
+    }
+
+    const query = customerQuery.trim();
+
+    if (query.length < 2) {
+      setCustomerResults([]);
+      setCustomerLoading(false);
+      setCustomerError(null);
+
+      return;
+    }
+
+    const controller = new AbortController();
+
+    const timeout = window.setTimeout(async () => {
+      setCustomerLoading(true);
+      setCustomerError(null);
+
+      try {
+        const params = new URLSearchParams({
+          businessId: BUSINESS_ID,
+          query,
+          limit: "10",
+        });
+
+        const response = await fetch(`/api/customers?${params.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            typeof result.error === "string"
+              ? result.error
+              : "No fue posible buscar clientes",
+          );
+        }
+
+        const data = result as CustomersResponse;
+
+        setCustomerResults(data.customers);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+
+        setCustomerError(
+          error instanceof Error
+            ? error.message
+            : "No fue posible buscar clientes",
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setCustomerLoading(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timeout);
+
+      controller.abort();
+    };
+  }, [customerMode, customerQuery]);
+
   const selectedService = useMemo(
     () => services.find((service) => service.id === form.serviceId) ?? null,
     [services, form.serviceId],
@@ -211,16 +299,13 @@ export default function NewReservationPage() {
       ? adults + children
       : 0;
 
+  const hasCustomer =
+    customerMode === "EXISTING"
+      ? selectedCustomer !== null
+      : !!form.firstName.trim() && !!form.lastName.trim();
+
   const localValidationError = useMemo(() => {
-    if (!form.firstName.trim() || !form.lastName.trim()) {
-      return null;
-    }
-
-    if (!form.serviceId) {
-      return null;
-    }
-
-    if (!form.checkIn || !form.checkOut) {
+    if (!form.serviceId || !form.checkIn || !form.checkOut) {
       return null;
     }
 
@@ -262,8 +347,6 @@ export default function NewReservationPage() {
     children,
     form.checkIn,
     form.checkOut,
-    form.firstName,
-    form.lastName,
     form.serviceId,
     guests,
     selectedService,
@@ -272,12 +355,41 @@ export default function NewReservationPage() {
   const canSubmit =
     !loadingServices &&
     !submitting &&
-    !!form.firstName.trim() &&
-    !!form.lastName.trim() &&
+    hasCustomer &&
     !!form.serviceId &&
     !!form.checkIn &&
     !!form.checkOut &&
     !localValidationError;
+
+  function selectExistingCustomer(customer: Customer) {
+    setSelectedCustomer(customer);
+
+    setCustomerQuery(getCustomerName(customer));
+
+    setCustomerResults([]);
+
+    setCustomerError(null);
+  }
+
+  function removeSelectedCustomer() {
+    setSelectedCustomer(null);
+
+    setCustomerQuery("");
+    setCustomerResults([]);
+  }
+
+  function changeCustomerMode(mode: CustomerMode) {
+    setCustomerMode(mode);
+    setSubmitError(null);
+
+    if (mode === "NEW") {
+      setSelectedCustomer(null);
+
+      setCustomerQuery("");
+      setCustomerResults([]);
+      setCustomerError(null);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -290,6 +402,21 @@ export default function NewReservationPage() {
     setSubmitError(null);
 
     try {
+      const customerPayload =
+        customerMode === "EXISTING" && selectedCustomer
+          ? {
+              customerId: selectedCustomer.id,
+            }
+          : {
+              firstName: form.firstName.trim(),
+
+              lastName: form.lastName.trim(),
+
+              email: form.email.trim() || undefined,
+
+              phone: form.phone.trim() || undefined,
+            };
+
       const response = await fetch("/api/reservations", {
         method: "POST",
 
@@ -302,13 +429,7 @@ export default function NewReservationPage() {
 
           serviceId: form.serviceId,
 
-          firstName: form.firstName.trim(),
-
-          lastName: form.lastName.trim(),
-
-          email: form.email.trim() || undefined,
-
-          phone: form.phone.trim() || undefined,
+          ...customerPayload,
 
           checkIn: form.checkIn,
 
@@ -392,79 +513,221 @@ export default function NewReservationPage() {
       <form onSubmit={handleSubmit} className="space-y-6">
         <section className="rounded-xl border border-zinc-200 bg-white">
           <div className="border-b border-zinc-200 px-5 py-4">
-            <h2 className="font-semibold">Datos del huésped</h2>
+            <h2 className="font-semibold">Cliente</h2>
 
             <p className="mt-1 text-sm text-zinc-500">
-              Información de contacto de la persona responsable de la reserva.
+              Reutiliza un cliente existente o registra uno nuevo.
             </p>
           </div>
 
-          <div className="grid gap-5 p-5 md:grid-cols-2">
-            <label className="flex flex-col gap-2 text-sm">
-              <span className="font-medium">Nombre *</span>
+          <div className="p-5">
+            <div className="mb-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => changeCustomerMode("EXISTING")}
+                className={`rounded-lg border px-4 py-2 text-sm font-medium ${
+                  customerMode === "EXISTING"
+                    ? "border-zinc-900 bg-zinc-900 text-white"
+                    : "border-zinc-300 bg-white"
+                }`}
+              >
+                Cliente existente
+              </button>
 
-              <input
-                type="text"
-                required
-                value={form.firstName}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    firstName: event.target.value,
-                  }))
-                }
-                className="h-10 rounded-lg border border-zinc-300 px-3"
-              />
-            </label>
+              <button
+                type="button"
+                onClick={() => changeCustomerMode("NEW")}
+                className={`rounded-lg border px-4 py-2 text-sm font-medium ${
+                  customerMode === "NEW"
+                    ? "border-zinc-900 bg-zinc-900 text-white"
+                    : "border-zinc-300 bg-white"
+                }`}
+              >
+                Cliente nuevo
+              </button>
+            </div>
 
-            <label className="flex flex-col gap-2 text-sm">
-              <span className="font-medium">Apellido *</span>
+            {customerMode === "EXISTING" ? (
+              <div>
+                {selectedCustomer ? (
+                  <div className="rounded-xl border border-zinc-200 p-4">
+                    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                      <div>
+                        <p className="font-medium">
+                          {getCustomerName(selectedCustomer)}
+                        </p>
 
-              <input
-                type="text"
-                required
-                value={form.lastName}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    lastName: event.target.value,
-                  }))
-                }
-                className="h-10 rounded-lg border border-zinc-300 px-3"
-              />
-            </label>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {selectedCustomer.email || "Sin correo"}
+                          {" · "}
+                          {selectedCustomer.phone || "Sin teléfono"}
+                        </p>
 
-            <label className="flex flex-col gap-2 text-sm">
-              <span className="font-medium">Correo electrónico</span>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          {selectedCustomer.reservationCount} reserva(s)
+                          registrada(s)
+                        </p>
+                      </div>
 
-              <input
-                type="email"
-                value={form.email}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    email: event.target.value,
-                  }))
-                }
-                className="h-10 rounded-lg border border-zinc-300 px-3"
-              />
-            </label>
+                      <button
+                        type="button"
+                        onClick={removeSelectedCustomer}
+                        className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium"
+                      >
+                        Cambiar cliente
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <label className="flex flex-col gap-2 text-sm">
+                      <span className="font-medium">Buscar cliente *</span>
 
-            <label className="flex flex-col gap-2 text-sm">
-              <span className="font-medium">Teléfono</span>
+                      <input
+                        type="search"
+                        autoComplete="off"
+                        value={customerQuery}
+                        onChange={(event) =>
+                          setCustomerQuery(event.target.value)
+                        }
+                        placeholder="Nombre, apellido, correo o teléfono..."
+                        className="h-10 rounded-lg border border-zinc-300 px-3"
+                      />
+                    </label>
 
-              <input
-                type="tel"
-                value={form.phone}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    phone: event.target.value,
-                  }))
-                }
-                className="h-10 rounded-lg border border-zinc-300 px-3"
-              />
-            </label>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Escribe al menos 2 caracteres.
+                    </p>
+
+                    {customerLoading && (
+                      <p className="mt-4 text-sm text-zinc-500">
+                        Buscando clientes...
+                      </p>
+                    )}
+
+                    {customerError && (
+                      <p className="mt-4 text-sm font-medium text-red-700">
+                        {customerError}
+                      </p>
+                    )}
+
+                    {!customerLoading &&
+                      customerQuery.trim().length >= 2 &&
+                      customerResults.length === 0 &&
+                      !customerError && (
+                        <div className="mt-4 rounded-lg border border-zinc-200 p-4">
+                          <p className="text-sm text-zinc-600">
+                            No se encontraron clientes.
+                          </p>
+
+                          <button
+                            type="button"
+                            onClick={() => changeCustomerMode("NEW")}
+                            className="mt-3 text-sm font-medium underline"
+                          >
+                            Registrar cliente nuevo
+                          </button>
+                        </div>
+                      )}
+
+                    {customerResults.length > 0 && (
+                      <div className="mt-4 divide-y divide-zinc-200 overflow-hidden rounded-xl border border-zinc-200">
+                        {customerResults.map((customer) => (
+                          <button
+                            key={customer.id}
+                            type="button"
+                            onClick={() => selectExistingCustomer(customer)}
+                            className="flex w-full flex-col gap-1 p-4 text-left hover:bg-zinc-50"
+                          >
+                            <span className="font-medium">
+                              {getCustomerName(customer)}
+                            </span>
+
+                            <span className="text-sm text-zinc-500">
+                              {customer.email || "Sin correo"}
+                              {" · "}
+                              {customer.phone || "Sin teléfono"}
+                            </span>
+
+                            <span className="text-xs text-zinc-500">
+                              {customer.reservationCount} reserva(s)
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="grid gap-5 md:grid-cols-2">
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Nombre *</span>
+
+                  <input
+                    type="text"
+                    required
+                    value={form.firstName}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        firstName: event.target.value,
+                      }))
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Apellido *</span>
+
+                  <input
+                    type="text"
+                    required
+                    value={form.lastName}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        lastName: event.target.value,
+                      }))
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Correo electrónico</span>
+
+                  <input
+                    type="email"
+                    value={form.email}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        email: event.target.value,
+                      }))
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Teléfono</span>
+
+                  <input
+                    type="tel"
+                    value={form.phone}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        phone: event.target.value,
+                      }))
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+              </div>
+            )}
           </div>
         </section>
 

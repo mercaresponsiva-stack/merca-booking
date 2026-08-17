@@ -548,6 +548,9 @@ export async function POST(request: NextRequest) {
 
     const serviceId = body.serviceId ?? body.roomTypeId;
 
+    const customerId =
+      typeof body.customerId === "string" ? body.customerId.trim() : "";
+
     const firstName = body.firstName;
     const lastName = body.lastName;
 
@@ -573,10 +576,9 @@ export async function POST(request: NextRequest) {
     if (
       !businessId ||
       !serviceId ||
-      !firstName ||
-      !lastName ||
       !checkIn ||
-      !checkOut
+      !checkOut ||
+      (!customerId && (!firstName || !lastName))
     ) {
       return NextResponse.json(
         {
@@ -1087,17 +1089,28 @@ export async function POST(request: NextRequest) {
         // 13. CUSTOMER
         // ─────────────────────────────────────────
 
-        const customer = await tx.customer.create({
-          data: {
-            businessId: business.id,
+        const customer = customerId
+          ? await tx.customer.findFirst({
+              where: {
+                id: customerId,
+                businessId: business.id,
+              },
+            })
+          : await tx.customer.create({
+              data: {
+                businessId: business.id,
 
-            firstName,
-            lastName,
+                firstName,
+                lastName,
 
-            email: email || null,
-            phone: phone || null,
-          },
-        });
+                email: email || null,
+                phone: phone || null,
+              },
+            });
+
+        if (!customer) {
+          throw new Error("CUSTOMER_NOT_FOUND");
+        }
 
         // ─────────────────────────────────────────
         // 14. RESERVATION
@@ -1324,6 +1337,18 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error: "Servicio no encontrado",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    if (error instanceof Error && error.message === "CUSTOMER_NOT_FOUND") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Cliente no encontrado para este negocio",
         },
         {
           status: 404,
