@@ -22,6 +22,17 @@ const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
 
 type PaymentOption = (typeof PAYMENT_OPTIONS)[number];
 
+const RESERVATION_SOURCES = [
+  "WEBSITE",
+  "WHATSAPP",
+  "PHONE",
+  "WALK_IN",
+  "AIRBNB",
+  "OTHER",
+] as const;
+
+type ReservationSource = (typeof RESERVATION_SOURCES)[number];
+
 function addDaysToDateOnly(dateOnly: string, days: number) {
   const date = new Date(`${dateOnly}T00:00:00.000Z`);
 
@@ -553,6 +564,8 @@ export async function POST(request: NextRequest) {
 
     const paymentOption = body.paymentOption as PaymentOption | undefined;
 
+    const source = (body.source ?? "WEBSITE") as ReservationSource;
+
     // ─────────────────────────────────────────────
     // 1. REQUIRED FIELDS
     // ─────────────────────────────────────────────
@@ -582,6 +595,18 @@ export async function POST(request: NextRequest) {
           success: false,
           error:
             "Debes seleccionar una modalidad de pago válida: FULL o DEPOSIT_50",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!RESERVATION_SOURCES.includes(source)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "El origen de la reserva no es válido",
         },
         {
           status: 400,
@@ -1099,11 +1124,25 @@ export async function POST(request: NextRequest) {
 
             paymentOption,
 
-            retractoEligible: true,
+            /*
+             * Regla actual del sistema:
+             *
+             * El flujo público WEBSITE conserva
+             * elegibilidad a retracto.
+             *
+             * Las reservas administrativas
+             * registran su canal real y no se
+             * marcan automáticamente elegibles.
+             *
+             * Esto representa la política actual
+             * del producto, no una determinación
+             * legal automática sobre cada caso.
+             */
+            retractoEligible: source === "WEBSITE",
 
             specialRequests: specialRequests || null,
 
-            source: "WEBSITE",
+            source,
           },
         });
 

@@ -264,13 +264,12 @@ export default function ReservationsPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              disabled
-              className="h-10 cursor-not-allowed rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white opacity-50"
+            <Link
+              href="/admin/reservations/new"
+              className="flex h-10 items-center rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white"
             >
               Nueva reserva
-            </button>
+            </Link>
           </div>
         </div>
 
