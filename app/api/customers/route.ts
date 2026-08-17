@@ -2,6 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 
+type CustomerSearchRow = {
+  id: string;
+
+  firstName: string;
+  lastName: string;
+
+  email: string | null;
+  phone: string | null;
+
+  reservationCount: number;
+
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
@@ -61,151 +76,95 @@ export async function GET(request: NextRequest) {
     }
 
     /*
-     * Dividimos la búsqueda en términos.
+     * Búsqueda tolerante para recepción.
      *
-     * Ejemplo:
-     * "Juan Pérez"
+     * - No distingue mayúsculas/minúsculas.
+     * - No distingue tildes/diacríticos.
+     * - Permite buscar por nombre, apellido,
+     *   correo o teléfono.
+     * - Cuando hay varios términos, TODOS
+     *   deben aparecer en algún campo del cliente.
      *
-     * requiere que "Juan" aparezca en alguno
-     * de los campos Y que "Pérez" también
-     * aparezca en alguno de ellos.
+     * Ejemplos:
+     *
+     * Liberacion
+     * -> Liberación
+     *
+     * JOSE GOMEZ
+     * -> José Gómez
+     *
+     * Prueba Liberacion
+     * -> exige "Prueba" Y "Liberación".
+     *
+     * Usamos $queryRaw parametrizado para no
+     * concatenar directamente texto ingresado
+     * por el usuario dentro del SQL.
      */
-    const terms = query
-      .split(/\s+/)
-      .map((term) => term.trim())
-      .filter(Boolean);
+    const customers = await prisma.$queryRaw<CustomerSearchRow[]>`
+        WITH search_terms AS (
+          SELECT term
+          FROM regexp_split_to_table(
+            trim(${query}::text),
+            '[[:space:]]+'
+          ) AS search_term(term)
+          WHERE term <> ''
+        )
 
-    const customerSelect = {
-      id: true,
-      firstName: true,
-      lastName: true,
-      email: true,
-      phone: true,
-      createdAt: true,
-      updatedAt: true,
+        SELECT
+          customer.id,
+          customer."firstName",
+          customer."lastName",
+          customer.email,
+          customer.phone,
 
-      _count: {
-        select: {
-          reservations: true,
-        },
-      },
-    } as const;
+          (
+            SELECT COUNT(*)::int
+            FROM "Reservation" reservation
+            WHERE reservation."customerId" = customer.id
+          ) AS "reservationCount",
 
-    const strictWhere =
-      terms.length > 0
-        ? {
-            businessId,
+          customer."createdAt",
+          customer."updatedAt"
 
-            AND: terms.map((term) => ({
-              OR: [
-                {
-                  firstName: {
-                    contains: term,
-                    mode: "insensitive" as const,
-                  },
-                },
-                {
-                  lastName: {
-                    contains: term,
-                    mode: "insensitive" as const,
-                  },
-                },
-                {
-                  email: {
-                    contains: term,
-                    mode: "insensitive" as const,
-                  },
-                },
-                {
-                  phone: {
-                    contains: term,
-                    mode: "insensitive" as const,
-                  },
-                },
-              ],
-            })),
-          }
-        : {
-            businessId,
-          };
+        FROM "Customer" customer
 
-    let customers = await prisma.customer.findMany({
-      where: strictWhere,
+        WHERE
+          customer."businessId" = ${businessId}
 
-      select: customerSelect,
+          AND NOT EXISTS (
+            SELECT 1
+            FROM search_terms
 
-      orderBy: [
-        {
-          updatedAt: "desc",
-        },
-        {
-          createdAt: "desc",
-        },
-      ],
+            WHERE
+              lower(
+                extensions.unaccent(
+                  concat_ws(
+                    ' ',
+                    customer."firstName",
+                    customer."lastName",
+                    COALESCE(customer.email, ''),
+                    COALESCE(customer.phone, '')
+                  )
+                )
+              )
+              NOT LIKE
+              (
+                '%' ||
+                lower(
+                  extensions.unaccent(
+                    search_terms.term
+                  )
+                ) ||
+                '%'
+              )
+          )
 
-      take: rawLimit,
-    });
+        ORDER BY
+          customer."updatedAt" DESC,
+          customer."createdAt" DESC
 
-    /*
-     * Fallback flexible.
-     *
-     * Si una búsqueda con varios términos no encuentra
-     * coincidencias exactas —por ejemplo por diferencias
-     * de tildes— buscamos por cualquiera de los términos.
-     *
-     * Así:
-     * "Prueba Liberacion"
-     *
-     * todavía puede encontrar:
-     * "Prueba Liberación"
-     */
-    if (customers.length === 0 && terms.length > 1) {
-      customers = await prisma.customer.findMany({
-        where: {
-          businessId,
-
-          OR: terms.flatMap((term) => [
-            {
-              firstName: {
-                contains: term,
-                mode: "insensitive" as const,
-              },
-            },
-            {
-              lastName: {
-                contains: term,
-                mode: "insensitive" as const,
-              },
-            },
-            {
-              email: {
-                contains: term,
-                mode: "insensitive" as const,
-              },
-            },
-            {
-              phone: {
-                contains: term,
-                mode: "insensitive" as const,
-              },
-            },
-          ]),
-        },
-
-        select: customerSelect,
-
-        orderBy: [
-          {
-            updatedAt: "desc",
-          },
-          {
-            createdAt: "desc",
-          },
-        ],
-
-        take: rawLimit,
-      });
-    }
+        LIMIT ${rawLimit}
+      `;
 
     return NextResponse.json({
       success: true,
@@ -222,9 +181,10 @@ export async function GET(request: NextRequest) {
         lastName: customer.lastName,
 
         email: customer.email,
+
         phone: customer.phone,
 
-        reservationCount: customer._count.reservations,
+        reservationCount: customer.reservationCount,
 
         createdAt: customer.createdAt,
 

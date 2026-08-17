@@ -54,7 +54,10 @@ export default function AdminLayout({
                 Calendario
               </div>
 
-              <div className="flex min-w-fit cursor-not-allowed items-center gap-3 rounded-lg px-4 py-3 text-sm text-zinc-500">
+              <Link
+                href="/admin/customers"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
                 <svg
                   viewBox="0 0 24 24"
                   fill="none"
@@ -67,7 +70,7 @@ export default function AdminLayout({
                   <path d="M6 20c0-3.5 2.7-6 6-6s6 2.5 6 6" />
                 </svg>
                 Clientes
-              </div>
+              </Link>
             </nav>
 
             <div className="hidden border-t border-zinc-800 p-4 lg:block">
