@@ -421,7 +421,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
               },
 
               orderBy: {
-                requestedAt: "asc",
+                requestedAt: "desc",
               },
             },
           },

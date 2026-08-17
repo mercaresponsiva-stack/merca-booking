@@ -11,6 +11,65 @@ type AdminUser = {
   role: string;
 };
 
+type CancellationInitiator = "CUSTOMER" | "PROVIDER";
+
+type CancellationResponse = {
+  success: true;
+
+  reservation: {
+    id: string;
+    confirmationCode: string;
+    status: "CANCELLED";
+  };
+
+  cancellation: {
+    id: string;
+    type: string;
+    reason: string | null;
+    requestedAt: string;
+    cancelledAt: string;
+
+    createdBy: {
+      id: string;
+      name: string;
+      email: string;
+      role: string;
+    } | null;
+
+    refunds: Array<{
+      id: string;
+      paymentId: string;
+      basis: string;
+
+      baseAmount: number | string;
+
+      contractElapsedDays: number;
+      paymentElapsedDays: number;
+
+      fullRefundDays: number;
+
+      annualAdministrativeRate: number | string;
+
+      maxAdministrativeRetention: number | string;
+
+      administrativeRetention: number | string;
+
+      amount: number | string;
+
+      status: string;
+
+      requestedAt: string;
+
+      payment: {
+        id: string;
+        amount: number | string;
+        method: string;
+        paidAt: string | null;
+      };
+    }>;
+  };
+};
+
 type Refund = {
   id: string;
   paymentId: string;
@@ -26,6 +85,193 @@ type Refund = {
   externalReference: string | null;
   processedBy: AdminUser | null;
 };
+
+type RefundGroup = {
+  key: string;
+
+  basis: string;
+
+  cancellationId: string | null;
+
+  reservationChangeId: string | null;
+
+  refunds: Refund[];
+
+  amount: number;
+
+  baseAmount: number;
+
+  requestedAt: string;
+
+  statuses: RefundAdminStatus[];
+
+  displayStatus: RefundAdminStatus | "MIXED";
+};
+
+type RefundAdminStatus =
+  | "PENDING"
+  | "PROCESSING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+type RefundAdminTargetStatus =
+  | "PROCESSING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+type RefundAction = {
+  status: RefundAdminTargetStatus;
+  label: string;
+};
+
+function getRefundActions(status: RefundAdminStatus): RefundAction[] {
+  switch (status) {
+    case "PENDING":
+      return [
+        {
+          status: "PROCESSING",
+          label: "Iniciar procesamiento",
+        },
+        {
+          status: "COMPLETED",
+          label: "Completar devolución",
+        },
+        {
+          status: "CANCELLED",
+          label: "Cancelar reembolso",
+        },
+      ];
+
+    case "PROCESSING":
+      return [
+        {
+          status: "COMPLETED",
+          label: "Completar devolución",
+        },
+        {
+          status: "FAILED",
+          label: "Marcar fallido",
+        },
+      ];
+
+    case "FAILED":
+      return [
+        {
+          status: "PROCESSING",
+          label: "Reintentar",
+        },
+      ];
+
+    case "COMPLETED":
+    case "CANCELLED":
+      return [];
+  }
+}
+
+function getRefundGroupActionLabel(status: RefundAdminTargetStatus) {
+  switch (status) {
+    case "PROCESSING":
+      return "Iniciar procesamiento";
+
+    case "COMPLETED":
+      return "Completar devolución";
+
+    case "FAILED":
+      return "Marcar fallido";
+
+    case "CANCELLED":
+      return "Cancelar reembolso";
+  }
+}
+
+function getRefundGroupActions(group: RefundGroup): RefundAction[] {
+  const candidates: RefundAdminTargetStatus[] = [
+    "PROCESSING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+  ];
+
+  return candidates
+    .filter((targetStatus) =>
+      group.refunds.every((refund) =>
+        getRefundActions(refund.status as RefundAdminStatus).some(
+          (action) => action.status === targetStatus,
+        ),
+      ),
+    )
+    .map((status) => ({
+      status,
+      label: getRefundGroupActionLabel(status),
+    }));
+}
+
+function groupRefunds(refunds: Refund[]): RefundGroup[] {
+  const groups = new Map<string, RefundGroup>();
+
+  for (const refund of refunds) {
+    const key = refund.cancellationId
+      ? `cancellation:${refund.cancellationId}:${refund.basis}`
+      : refund.reservationChangeId
+        ? `change:${refund.reservationChangeId}:${refund.basis}`
+        : `refund:${refund.id}`;
+
+    const existing = groups.get(key);
+
+    const status = refund.status as RefundAdminStatus;
+
+    if (!existing) {
+      groups.set(key, {
+        key,
+
+        basis: refund.basis,
+
+        cancellationId: refund.cancellationId,
+
+        reservationChangeId: refund.reservationChangeId,
+
+        refunds: [refund],
+
+        amount: refund.amount,
+
+        baseAmount: refund.baseAmount,
+
+        requestedAt: refund.requestedAt,
+
+        statuses: [status],
+
+        displayStatus: status,
+      });
+
+      continue;
+    }
+
+    existing.refunds.push(refund);
+
+    existing.amount += refund.amount;
+
+    existing.baseAmount += refund.baseAmount;
+
+    existing.statuses.push(status);
+
+    if (new Set(existing.statuses).size === 1) {
+      existing.displayStatus = existing.statuses[0];
+    } else {
+      existing.displayStatus = "MIXED";
+    }
+
+    if (new Date(refund.requestedAt) > new Date(existing.requestedAt)) {
+      existing.requestedAt = refund.requestedAt;
+    }
+  }
+
+  return [...groups.values()].sort(
+    (a, b) =>
+      new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
+  );
+}
 
 type ReservationDetailResponse = {
   success: true;
@@ -190,6 +436,100 @@ type ReservationDetailResponse = {
   }>;
 };
 
+type RescheduleResponse = {
+  success: true;
+
+  reservation: {
+    id: string;
+    confirmationCode: string;
+    status: string;
+    startAt: string;
+    endAt: string;
+    subtotal: number;
+    total: number;
+    paymentOption: string | null;
+  };
+
+  pricing: {
+    nights: number;
+    nightlyPrices: unknown[];
+    total: number;
+  };
+
+  change: {
+    id: string;
+    type: string;
+    oldStartAt: string | null;
+    newStartAt: string | null;
+    oldEndAt: string | null;
+    newEndAt: string | null;
+    oldTotal: number | null;
+    newTotal: number | null;
+    oldStatus: string | null;
+    newStatus: string | null;
+    reason: string | null;
+    createdAt: string;
+  };
+
+  resources: {
+    kept: Array<{
+      assignmentId: string;
+      resourceId: string;
+      serviceId: string;
+      resourceTypeId: string | null;
+    }>;
+
+    released: Array<{
+      assignmentId: string;
+      resourceId: string;
+      serviceId: string;
+      resourceTypeId: string | null;
+      reason: string;
+    }>;
+  };
+
+  financialImpact: {
+    priceDifference: number;
+    netPaid: number;
+    balance: number;
+    overpayment: number;
+    initialPaymentShortfall: number;
+    nextStatus: string;
+  };
+
+  paymentSummary: {
+    total: number;
+    paid: number;
+    grossPaid: number;
+    pending: number;
+    refundPending: number;
+    refunded: number;
+    netPaid: number;
+    balance: number;
+    isPaid: boolean;
+    initialPaymentRemaining: number | null;
+    initialPaymentSatisfied: boolean;
+  };
+
+  financialState: {
+    contractualBalance: number;
+    amountDue: number;
+    canAcceptPayment: boolean;
+    hasRefundPending: boolean;
+    isCancelled: boolean;
+  };
+
+  refunds: Array<{
+    id: string;
+    paymentId: string;
+    basis: string;
+    baseAmount: number;
+    amount: number;
+    status: string;
+    reservationChangeId: string | null;
+  }>;
+};
+
 type RegisterablePaymentMethod = "BANK_TRANSFER" | "CASH";
 
 type PaymentTargetStatus = "PAID" | "FAILED";
@@ -294,6 +634,23 @@ function formatMoney(amount: number, currency: string) {
   }).format(amount);
 }
 
+function getDateOnlyInTimezone(value: string, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(value));
+
+  const year = parts.find((part) => part.type === "year")?.value ?? "";
+
+  const month = parts.find((part) => part.type === "month")?.value ?? "";
+
+  const day = parts.find((part) => part.type === "day")?.value ?? "";
+
+  return `${year}-${month}-${day}`;
+}
+
 function formatDate(value: string, timezone: string) {
   return new Intl.DateTimeFormat("es-SV", {
     timeZone: timezone,
@@ -376,6 +733,57 @@ export default function ReservationDetailPage() {
   }>();
 
   const reservationId = params.id;
+
+  const [cancellationDialogOpen, setCancellationDialogOpen] = useState(false);
+
+  const [cancellationInitiator, setCancellationInitiator] =
+    useState<CancellationInitiator>("CUSTOMER");
+
+  const [cancellationReason, setCancellationReason] = useState("");
+
+  const [cancellationSubmitting, setCancellationSubmitting] = useState(false);
+
+  const [cancellationError, setCancellationError] = useState<string | null>(
+    null,
+  );
+
+  const [cancellationResult, setCancellationResult] =
+    useState<CancellationResponse | null>(null);
+
+  const [refundDialogOpen, setRefundDialogOpen] = useState(false);
+
+  const [selectedRefundGroup, setSelectedRefundGroup] =
+    useState<RefundGroup | null>(null);
+
+  const [refundTargetStatus, setRefundTargetStatus] =
+    useState<RefundAdminTargetStatus | null>(null);
+
+  const [refundExternalReference, setRefundExternalReference] = useState("");
+
+  const [refundSubmitting, setRefundSubmitting] = useState(false);
+
+  const [refundActionError, setRefundActionError] = useState<string | null>(
+    null,
+  );
+
+  const [refundActionSuccess, setRefundActionSuccess] = useState<string | null>(
+    null,
+  );
+
+  const [rescheduleDialogOpen, setRescheduleDialogOpen] = useState(false);
+
+  const [rescheduleCheckIn, setRescheduleCheckIn] = useState("");
+
+  const [rescheduleCheckOut, setRescheduleCheckOut] = useState("");
+
+  const [rescheduleReason, setRescheduleReason] = useState("");
+
+  const [rescheduleSubmitting, setRescheduleSubmitting] = useState(false);
+
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+
+  const [rescheduleResult, setRescheduleResult] =
+    useState<RescheduleResponse | null>(null);
 
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
 
@@ -802,6 +1210,251 @@ export default function ReservationDetailPage() {
     }
   }
 
+  function openRescheduleDialog() {
+    if (!data) {
+      return;
+    }
+
+    setRescheduleError(null);
+    setRescheduleResult(null);
+
+    setRescheduleCheckIn(
+      getDateOnlyInTimezone(data.reservation.startAt, data.business.timezone),
+    );
+
+    setRescheduleCheckOut(
+      getDateOnlyInTimezone(data.reservation.endAt, data.business.timezone),
+    );
+
+    setRescheduleReason("");
+    setRescheduleDialogOpen(true);
+  }
+
+  async function handleReschedule() {
+    if (!rescheduleCheckIn || !rescheduleCheckOut) {
+      setRescheduleError("Debes indicar las nuevas fechas.");
+      return;
+    }
+
+    if (rescheduleCheckOut <= rescheduleCheckIn) {
+      setRescheduleError(
+        "La fecha de salida debe ser posterior a la fecha de entrada.",
+      );
+      return;
+    }
+
+    setRescheduleSubmitting(true);
+    setRescheduleError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/reschedule`,
+        {
+          method: "PATCH",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            checkIn: rescheduleCheckIn,
+
+            checkOut: rescheduleCheckOut,
+
+            changedById: TEMP_RECEPTION_USER_ID,
+
+            reason: rescheduleReason.trim() || undefined,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error === "string"
+            ? result.error
+            : "No fue posible reprogramar la reserva",
+        );
+      }
+
+      const rescheduleResponse = result as RescheduleResponse;
+
+      setRescheduleResult(rescheduleResponse);
+
+      setRescheduleDialogOpen(false);
+
+      await loadReservation();
+    } catch (error) {
+      setRescheduleError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible reprogramar la reserva",
+      );
+    } finally {
+      setRescheduleSubmitting(false);
+    }
+  }
+
+  function openRefundGroupDialog(
+    group: RefundGroup,
+    targetStatus: RefundAdminTargetStatus,
+  ) {
+    setSelectedRefundGroup(group);
+
+    setRefundTargetStatus(targetStatus);
+
+    setRefundExternalReference("");
+
+    setRefundActionError(null);
+    setRefundActionSuccess(null);
+
+    setRefundDialogOpen(true);
+  }
+
+  async function handleRefundGroupStatusChange() {
+    if (!selectedRefundGroup || !refundTargetStatus) {
+      return;
+    }
+
+    setRefundSubmitting(true);
+
+    setRefundActionError(null);
+    setRefundActionSuccess(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/refunds/group`,
+        {
+          method: "PATCH",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            refundIds: selectedRefundGroup.refunds.map((refund) => refund.id),
+
+            status: refundTargetStatus,
+
+            processedById: TEMP_RECEPTION_USER_ID,
+
+            externalReference: refundExternalReference.trim() || undefined,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error === "string"
+            ? result.error
+            : "No fue posible procesar la devolución",
+        );
+      }
+
+      const successMessages: Record<RefundAdminTargetStatus, string> = {
+        PROCESSING: "La devolución pasó a procesamiento.",
+
+        COMPLETED: "La devolución fue completada correctamente.",
+
+        FAILED: "La devolución fue marcada como fallida.",
+
+        CANCELLED: "La devolución fue cancelada.",
+      };
+
+      setRefundActionSuccess(successMessages[refundTargetStatus]);
+
+      setRefundDialogOpen(false);
+
+      setSelectedRefundGroup(null);
+
+      setRefundTargetStatus(null);
+
+      setRefundExternalReference("");
+
+      await loadReservation();
+    } catch (error) {
+      setRefundActionError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible procesar la devolución",
+      );
+    } finally {
+      setRefundSubmitting(false);
+    }
+  }
+
+  function openCancellationDialog() {
+    setCancellationInitiator("CUSTOMER");
+
+    setCancellationReason("");
+    setCancellationError(null);
+    setCancellationResult(null);
+    setCancellationDialogOpen(true);
+  }
+
+  async function handleCancelReservation() {
+    setCancellationSubmitting(true);
+    setCancellationError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/cancel`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            initiator: cancellationInitiator,
+
+            reason: cancellationReason.trim() || undefined,
+
+            /*
+             * Temporal mientras no exista
+             * autenticación administrativa.
+             *
+             * Aunque CUSTOMER no lo exige,
+             * conservamos trazabilidad de
+             * quién procesó la operación.
+             */
+            createdById: TEMP_RECEPTION_USER_ID,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error === "string"
+            ? result.error
+            : "No fue posible cancelar la reserva",
+        );
+      }
+
+      const cancellationResponse = result as CancellationResponse;
+
+      setCancellationResult(cancellationResponse);
+
+      setCancellationDialogOpen(false);
+
+      await loadReservation();
+    } catch (error) {
+      setCancellationError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible cancelar la reserva",
+      );
+    } finally {
+      setCancellationSubmitting(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center text-sm text-zinc-500">
@@ -839,6 +1492,16 @@ export default function ReservationDetailPage() {
 
   const { reservation, business, customer, paymentSummary, financialState } =
     data;
+
+  const refundGroups = groupRefunds(data.refunds);
+
+  const canCancelReservation =
+    (reservation.status === "PENDING" || reservation.status === "CONFIRMED") &&
+    !data.cancellation;
+
+  const canReschedule =
+    ["PENDING", "CONFIRMED"].includes(reservation.status) &&
+    !financialState.hasRefundPending;
 
   const pendingInitialPayment =
     data.payments.find(
@@ -925,8 +1588,18 @@ export default function ReservationDetailPage() {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            disabled
-            className="h-10 cursor-not-allowed rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium opacity-50"
+            disabled={!canCancelReservation}
+            onClick={openCancellationDialog}
+            className="h-10 rounded-lg border border-red-300 bg-white px-4 text-sm font-medium text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancelar reserva
+          </button>
+
+          <button
+            type="button"
+            disabled={!canReschedule}
+            onClick={openRescheduleDialog}
+            className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
           >
             Reprogramar
           </button>
@@ -988,6 +1661,198 @@ export default function ReservationDetailPage() {
       {paymentActionError && (
         <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
           {paymentActionError}
+        </div>
+      )}
+
+      {refundActionSuccess && (
+        <div className="mt-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
+          {refundActionSuccess}
+        </div>
+      )}
+
+      {refundActionError && !refundDialogOpen && (
+        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+          {refundActionError}
+        </div>
+      )}
+
+      {cancellationResult && (
+        <div className="mt-3 rounded-xl border border-zinc-300 bg-zinc-50 p-4 text-sm">
+          <p className="font-semibold">Reserva cancelada correctamente</p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-zinc-500">Clasificación</p>
+
+              <p className="mt-1 font-medium">
+                {cancellationResult.cancellation.type.replaceAll("_", " ")}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-zinc-500">Estado</p>
+
+              <p className="mt-1 font-medium">Cancelada</p>
+            </div>
+
+            <div>
+              <p className="text-xs text-zinc-500">Reembolsos generados</p>
+
+              <p className="mt-1 font-medium">
+                {cancellationResult.cancellation.refunds.length}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-zinc-500">Total a devolver</p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  cancellationResult.cancellation.refunds.reduce(
+                    (sum, refund) => sum + Number(refund.amount),
+                    0,
+                  ),
+                  business.currency,
+                )}
+              </p>
+            </div>
+          </div>
+
+          {cancellationResult.cancellation.refunds.length > 0 && (
+            <div className="mt-4 space-y-2">
+              {cancellationResult.cancellation.refunds.map((refund) => (
+                <div
+                  key={refund.id}
+                  className="rounded-lg border border-zinc-200 bg-white p-3"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-medium">
+                        {refund.basis.replaceAll("_", " ")}
+                      </p>
+
+                      <p className="mt-1 text-xs text-zinc-500">
+                        Pago {refund.payment.method}
+                      </p>
+                    </div>
+
+                    <p className="font-semibold">
+                      {formatMoney(Number(refund.amount), business.currency)}
+                    </p>
+                  </div>
+
+                  {Number(refund.administrativeRetention) > 0 && (
+                    <p className="mt-2 text-xs text-zinc-600">
+                      Retención administrativa:{" "}
+                      {formatMoney(
+                        Number(refund.administrativeRetention),
+                        business.currency,
+                      )}
+                    </p>
+                  )}
+
+                  <p className="mt-2 text-xs text-zinc-500">
+                    Estado inicial: {refund.status}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {cancellationResult.cancellation.refunds.length === 0 && (
+            <p className="mt-4 text-zinc-600">
+              No fue necesario generar ningún reembolso porque no había
+              principal pagado disponible para devolver.
+            </p>
+          )}
+        </div>
+      )}
+
+      {rescheduleResult && (
+        <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
+          <p className="font-semibold">Reserva reprogramada correctamente</p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-green-700">Nuevas fechas</p>
+
+              <p className="mt-1 font-medium">
+                {formatDate(
+                  rescheduleResult.reservation.startAt,
+                  business.timezone,
+                )}
+                {" → "}
+                {formatDate(
+                  rescheduleResult.reservation.endAt,
+                  business.timezone,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">Precio</p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  rescheduleResult.change.oldTotal ?? 0,
+                  business.currency,
+                )}
+                {" → "}
+                {formatMoney(
+                  rescheduleResult.change.newTotal ?? 0,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">Estado</p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(rescheduleResult.reservation.status)}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">Recursos</p>
+
+              <p className="mt-1 font-medium">
+                {rescheduleResult.resources.kept.length} conservado(s) ·{" "}
+                {rescheduleResult.resources.released.length} liberado(s)
+              </p>
+            </div>
+          </div>
+
+          {rescheduleResult.financialImpact.initialPaymentShortfall > 0 && (
+            <p className="mt-3 font-medium text-amber-800">
+              Se requiere un pago adicional de{" "}
+              {formatMoney(
+                rescheduleResult.financialImpact.initialPaymentShortfall,
+                business.currency,
+              )}{" "}
+              para volver a cubrir el anticipo.
+            </p>
+          )}
+
+          {rescheduleResult.refunds.length > 0 && (
+            <div className="mt-3">
+              {rescheduleResult.refunds.map((refund) => (
+                <p key={refund.id} className="font-medium">
+                  Devolución generada:{" "}
+                  {formatMoney(refund.amount, business.currency)} ·{" "}
+                  {refund.basis.replaceAll("_", " ")} ·{" "}
+                  {getStatusLabel(refund.status)}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {rescheduleResult.resources.released.length > 0 && (
+            <p className="mt-3 text-amber-800">
+              Uno o más recursos asignados fueron liberados porque no podían
+              mantenerse en las nuevas fechas.
+            </p>
+          )}
         </div>
       )}
 
@@ -1405,32 +2270,62 @@ export default function ReservationDetailPage() {
             </div>
           </section>
 
-          {data.refunds.length > 0 && (
+          {refundGroups.length > 0 && (
             <section className="rounded-xl border border-zinc-200 bg-white">
               <div className="border-b border-zinc-200 px-5 py-4">
                 <h2 className="font-semibold">Devoluciones</h2>
               </div>
 
               <div className="divide-y divide-zinc-100">
-                {data.refunds.map((refund) => (
-                  <div key={refund.id} className="p-5">
-                    <div className="flex justify-between gap-3">
-                      <div>
-                        <p className="font-medium">
-                          {refund.basis.replaceAll("_", " ")}
-                        </p>
+                {refundGroups.map((group) => {
+                  const actions = getRefundGroupActions(group);
 
-                        <p className="mt-1 text-xs text-zinc-500">
-                          {getStatusLabel(refund.status)}
+                  return (
+                    <div key={group.key} className="p-5">
+                      <div className="flex justify-between gap-3">
+                        <div>
+                          <p className="font-medium">
+                            {group.basis.replaceAll("_", " ")}
+                          </p>
+
+                          <p className="mt-1 text-sm text-zinc-500">
+                            {group.displayStatus === "MIXED"
+                              ? "Estados mixtos"
+                              : getStatusLabel(group.displayStatus)}
+                          </p>
+
+                          {group.refunds.length > 1 && (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              {group.refunds.length} movimientos internos
+                              asociados
+                            </p>
+                          )}
+                        </div>
+
+                        <p className="font-semibold">
+                          {formatMoney(group.amount, business.currency)}
                         </p>
                       </div>
 
-                      <p className="font-semibold">
-                        {formatMoney(refund.amount, business.currency)}
-                      </p>
+                      {actions.length > 0 && (
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          {actions.map((action) => (
+                            <button
+                              key={action.status}
+                              type="button"
+                              onClick={() =>
+                                openRefundGroupDialog(group, action.status)
+                              }
+                              className="rounded-lg border border-zinc-300 px-3 py-2 text-xs font-medium"
+                            >
+                              {action.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </section>
           )}
@@ -1901,6 +2796,363 @@ export default function ReservationDetailPage() {
                 className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
               >
                 {paymentSubmitting ? "Registrando..." : "Registrar pago"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rescheduleDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">Reprogramar reserva</h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="rounded-lg bg-zinc-50 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Fechas actuales
+                </p>
+
+                <p className="mt-2 text-sm font-medium">
+                  {formatDate(reservation.startAt, business.timezone)}
+                  {" → "}
+                  {formatDate(reservation.endAt, business.timezone)}
+                </p>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Nueva entrada</span>
+
+                  <input
+                    type="date"
+                    value={rescheduleCheckIn}
+                    onChange={(event) =>
+                      setRescheduleCheckIn(event.target.value)
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Nueva salida</span>
+
+                  <input
+                    type="date"
+                    value={rescheduleCheckOut}
+                    onChange={(event) =>
+                      setRescheduleCheckOut(event.target.value)
+                    }
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">Motivo</span>
+
+                <textarea
+                  rows={3}
+                  value={rescheduleReason}
+                  onChange={(event) => setRescheduleReason(event.target.value)}
+                  placeholder="Ej. solicitud del huésped"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                El sistema volverá a calcular disponibilidad, tarifa y estado
+                financiero. Una habitación puede conservarse o liberarse y un
+                cambio de precio puede requerir un pago adicional o generar una
+                devolución.
+              </div>
+
+              {rescheduleError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {rescheduleError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={rescheduleSubmitting}
+                onClick={() => {
+                  setRescheduleDialogOpen(false);
+                  setRescheduleError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  rescheduleSubmitting ||
+                  !rescheduleCheckIn ||
+                  !rescheduleCheckOut
+                }
+                onClick={() => void handleReschedule()}
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {rescheduleSubmitting
+                  ? "Reprogramando..."
+                  : "Confirmar reprogramación"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {refundDialogOpen && selectedRefundGroup && refundTargetStatus && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">Gestionar devolución</h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="rounded-lg bg-zinc-50 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Importe total
+                </p>
+
+                <p className="mt-2 text-2xl font-semibold">
+                  {formatMoney(selectedRefundGroup.amount, business.currency)}
+                </p>
+
+                <p className="mt-2 text-sm text-zinc-500">
+                  {selectedRefundGroup.basis.replaceAll("_", " ")}
+                </p>
+
+                {selectedRefundGroup.refunds.length > 1 && (
+                  <p className="mt-2 text-xs text-zinc-500">
+                    Esta devolución está respaldada internamente por{" "}
+                    {selectedRefundGroup.refunds.length} movimientos vinculados
+                    a los pagos originales.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-zinc-200 p-4 text-sm">
+                <p>
+                  Estado actual:{" "}
+                  <span className="font-medium">
+                    {selectedRefundGroup.displayStatus === "MIXED"
+                      ? "Estados mixtos"
+                      : getStatusLabel(selectedRefundGroup.displayStatus)}
+                  </span>
+                </p>
+
+                <p className="mt-1">
+                  Nuevo estado:{" "}
+                  <span className="font-medium">
+                    {getStatusLabel(refundTargetStatus)}
+                  </span>
+                </p>
+              </div>
+
+              {(refundTargetStatus === "PROCESSING" ||
+                refundTargetStatus === "COMPLETED") && (
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium">Referencia externa</span>
+
+                  <input
+                    type="text"
+                    value={refundExternalReference}
+                    onChange={(event) =>
+                      setRefundExternalReference(event.target.value)
+                    }
+                    placeholder="Ej. referencia bancaria (opcional)"
+                    className="h-10 rounded-lg border border-zinc-300 px-3"
+                  />
+                </label>
+              )}
+
+              {refundTargetStatus === "COMPLETED" && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  La operación completa será marcada como devuelta. Todos sus
+                  movimientos internos se actualizarán dentro de una sola
+                  transacción.
+                </div>
+              )}
+
+              {refundTargetStatus === "CANCELLED" && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  Todos los reembolsos pendientes que componen esta operación
+                  quedarán cancelados.
+                </div>
+              )}
+
+              {refundActionError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {refundActionError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={refundSubmitting}
+                onClick={() => {
+                  setRefundDialogOpen(false);
+                  setSelectedRefundGroup(null);
+                  setRefundTargetStatus(null);
+                  setRefundActionError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Volver
+              </button>
+
+              <button
+                type="button"
+                disabled={refundSubmitting}
+                onClick={() => void handleRefundGroupStatusChange()}
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {refundSubmitting ? "Procesando..." : "Confirmar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cancellationDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">Cancelar reserva</h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="rounded-lg bg-zinc-50 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Reserva
+                </p>
+
+                <p className="mt-2 font-medium">
+                  {customer.firstName} {customer.lastName}
+                </p>
+
+                <p className="mt-1 text-sm text-zinc-500">
+                  {formatDate(reservation.startAt, business.timezone)}
+                  {" → "}
+                  {formatDate(reservation.endAt, business.timezone)}
+                </p>
+
+                <p className="mt-2 text-sm">
+                  Total:{" "}
+                  <span className="font-medium">
+                    {formatMoney(reservation.total, business.currency)}
+                  </span>
+                </p>
+
+                <p className="mt-1 text-sm">
+                  Pagado neto:{" "}
+                  <span className="font-medium">
+                    {formatMoney(paymentSummary.netPaid, business.currency)}
+                  </span>
+                </p>
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  ¿Quién solicita la cancelación?
+                </span>
+
+                <select
+                  value={cancellationInitiator}
+                  onChange={(event) => {
+                    const value = event.target.value;
+
+                    if (value === "CUSTOMER" || value === "PROVIDER") {
+                      setCancellationInitiator(value);
+                    }
+                  }}
+                  className="h-10 rounded-lg border border-zinc-300 bg-white px-3"
+                >
+                  <option value="CUSTOMER">Cliente</option>
+
+                  <option value="PROVIDER">Negocio / proveedor</option>
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">Motivo</span>
+
+                <textarea
+                  rows={3}
+                  value={cancellationReason}
+                  onChange={(event) =>
+                    setCancellationReason(event.target.value)
+                  }
+                  placeholder="Ej. solicitud del huésped"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                La clasificación y el importe reembolsable no se determinan
+                manualmente. El sistema aplicará automáticamente la política
+                vigente, incluyendo retracto o retención administrativa cuando
+                corresponda.
+              </div>
+
+              {cancellationInitiator === "PROVIDER" && (
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm text-zinc-700">
+                  Cuando la cancelación es iniciada por el negocio, el sistema
+                  aplicará las reglas correspondientes a una cancelación del
+                  proveedor.
+                </div>
+              )}
+
+              {cancellationError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {cancellationError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={cancellationSubmitting}
+                onClick={() => {
+                  setCancellationDialogOpen(false);
+                  setCancellationError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Volver
+              </button>
+
+              <button
+                type="button"
+                disabled={cancellationSubmitting}
+                onClick={() => void handleCancelReservation()}
+                className="h-10 rounded-lg bg-red-700 px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {cancellationSubmitting
+                  ? "Cancelando..."
+                  : "Confirmar cancelación"}
               </button>
             </div>
           </div>

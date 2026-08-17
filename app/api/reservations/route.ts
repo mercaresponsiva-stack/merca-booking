@@ -319,10 +319,10 @@ export async function GET(request: NextRequest) {
 
         orderBy: [
           {
-            startAt: "asc",
+            createdAt: "desc",
           },
           {
-            createdAt: "desc",
+            startAt: "desc",
           },
         ],
 

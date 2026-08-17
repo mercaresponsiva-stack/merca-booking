@@ -70,13 +70,13 @@ export async function GET(_request: Request, context: RouteContext) {
               },
 
               orderBy: {
-                requestedAt: "asc",
+                requestedAt: "desc",
               },
             },
           },
 
           orderBy: {
-            createdAt: "asc",
+            createdAt: "desc",
           },
         },
 
@@ -119,7 +119,7 @@ export async function GET(_request: Request, context: RouteContext) {
           },
 
           orderBy: {
-            requestedAt: "asc",
+            requestedAt: "desc",
           },
         },
 
@@ -158,7 +158,7 @@ export async function GET(_request: Request, context: RouteContext) {
           },
 
           orderBy: {
-            createdAt: "asc",
+            createdAt: "desc",
           },
         },
       },
