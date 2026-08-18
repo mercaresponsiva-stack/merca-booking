@@ -39,7 +39,10 @@ export default function AdminLayout({
                 Reservas
               </Link>
 
-              <div className="flex min-w-fit cursor-not-allowed items-center gap-3 rounded-lg px-4 py-3 text-sm text-zinc-500">
+              <Link
+                href="/admin/calendar"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
                 <svg
                   viewBox="0 0 24 24"
                   fill="none"
@@ -49,10 +52,11 @@ export default function AdminLayout({
                   aria-hidden="true"
                 >
                   <circle cx="12" cy="12" r="8" />
+
                   <path d="M12 8v4l3 2" />
                 </svg>
                 Calendario
-              </div>
+              </Link>
 
               <Link
                 href="/admin/customers"
