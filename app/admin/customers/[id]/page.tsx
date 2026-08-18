@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
 
@@ -196,6 +196,19 @@ export default function CustomerDetailPage() {
 
   const [error, setError] = useState<string | null>(null);
 
+  const [editingCustomer, setEditingCustomer] = useState(false);
+
+  const [editForm, setEditForm] = useState({
+    firstName: "",
+    lastName: "",
+    email: "",
+    phone: "",
+  });
+
+  const [editSubmitting, setEditSubmitting] = useState(false);
+
+  const [editError, setEditError] = useState<string | null>(null);
+
   const loadCustomer = useCallback(async () => {
     if (!customerId) {
       return;
@@ -241,6 +254,94 @@ export default function CustomerDetailPage() {
   useEffect(() => {
     void loadCustomer();
   }, [loadCustomer]);
+
+  function openEditCustomer() {
+    if (!data) {
+      return;
+    }
+
+    setEditForm({
+      firstName: data.customer.firstName,
+
+      lastName: data.customer.lastName,
+
+      email: data.customer.email ?? "",
+
+      phone: data.customer.phone ?? "",
+    });
+
+    setEditError(null);
+    setEditingCustomer(true);
+  }
+
+  function cancelEditCustomer() {
+    setEditingCustomer(false);
+    setEditError(null);
+  }
+
+  async function handleEditCustomer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!data) {
+      return;
+    }
+
+    const firstName = editForm.firstName.trim();
+
+    const lastName = editForm.lastName.trim();
+
+    if (!firstName || !lastName) {
+      setEditError("Nombre y apellido son obligatorios.");
+
+      return;
+    }
+
+    setEditSubmitting(true);
+    setEditError(null);
+
+    try {
+      const response = await fetch(`/api/customers/${data.customer.id}`, {
+        method: "PATCH",
+
+        headers: {
+          "Content-Type": "application/json",
+        },
+
+        body: JSON.stringify({
+          businessId: BUSINESS_ID,
+
+          firstName,
+          lastName,
+
+          email: editForm.email.trim(),
+
+          phone: editForm.phone.trim(),
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error === "string"
+            ? result.error
+            : "No fue posible actualizar el cliente",
+        );
+      }
+
+      setEditingCustomer(false);
+
+      await loadCustomer();
+    } catch (error) {
+      setEditError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible actualizar el cliente",
+      );
+    } finally {
+      setEditSubmitting(false);
+    }
+  }
 
   if (loading) {
     return (
@@ -305,49 +406,168 @@ export default function CustomerDetailPage() {
       <div className="grid gap-6 xl:grid-cols-[1fr_320px]">
         <div className="space-y-6">
           <section className="rounded-xl border border-zinc-200 bg-white">
-            <div className="border-b border-zinc-200 px-5 py-4">
-              <h2 className="font-semibold">Datos del cliente</h2>
+            <div className="flex flex-col justify-between gap-3 border-b border-zinc-200 px-5 py-4 sm:flex-row sm:items-center">
+              <div>
+                <h2 className="font-semibold">Datos del cliente</h2>
+
+                <p className="mt-1 text-sm text-zinc-500">
+                  Información personal y de contacto.
+                </p>
+              </div>
+
+              {!editingCustomer && (
+                <button
+                  type="button"
+                  onClick={openEditCustomer}
+                  className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium"
+                >
+                  Editar cliente
+                </button>
+              )}
             </div>
 
-            <div className="grid gap-5 p-5 sm:grid-cols-2">
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Nombre
-                </p>
+            {editingCustomer ? (
+              <form onSubmit={handleEditCustomer} className="p-5">
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <label className="flex flex-col gap-2 text-sm">
+                    <span className="font-medium">Nombre *</span>
 
-                <p className="mt-1 text-sm font-medium">
-                  {customer.firstName} {customer.lastName}
-                </p>
+                    <input
+                      type="text"
+                      required
+                      value={editForm.firstName}
+                      onChange={(event) =>
+                        setEditForm((current) => ({
+                          ...current,
+
+                          firstName: event.target.value,
+                        }))
+                      }
+                      className="h-10 rounded-lg border border-zinc-300 px-3"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-2 text-sm">
+                    <span className="font-medium">Apellido *</span>
+
+                    <input
+                      type="text"
+                      required
+                      value={editForm.lastName}
+                      onChange={(event) =>
+                        setEditForm((current) => ({
+                          ...current,
+
+                          lastName: event.target.value,
+                        }))
+                      }
+                      className="h-10 rounded-lg border border-zinc-300 px-3"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-2 text-sm">
+                    <span className="font-medium">Correo electrónico</span>
+
+                    <input
+                      type="email"
+                      value={editForm.email}
+                      onChange={(event) =>
+                        setEditForm((current) => ({
+                          ...current,
+
+                          email: event.target.value,
+                        }))
+                      }
+                      className="h-10 rounded-lg border border-zinc-300 px-3"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-2 text-sm">
+                    <span className="font-medium">Teléfono</span>
+
+                    <input
+                      type="tel"
+                      value={editForm.phone}
+                      onChange={(event) =>
+                        setEditForm((current) => ({
+                          ...current,
+
+                          phone: event.target.value,
+                        }))
+                      }
+                      className="h-10 rounded-lg border border-zinc-300 px-3"
+                    />
+                  </label>
+                </div>
+
+                {editError && (
+                  <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                    {editError}
+                  </div>
+                )}
+
+                <div className="mt-5 flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={cancelEditCustomer}
+                    disabled={editSubmitting}
+                    className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={editSubmitting}
+                    className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {editSubmitting ? "Guardando..." : "Guardar cambios"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="grid gap-5 p-5 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Nombre
+                  </p>
+
+                  <p className="mt-1 text-sm font-medium">
+                    {customer.firstName} {customer.lastName}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Correo
+                  </p>
+
+                  <p className="mt-1 text-sm">
+                    {customer.email || "Sin correo registrado"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Teléfono
+                  </p>
+
+                  <p className="mt-1 text-sm">
+                    {customer.phone || "Sin teléfono registrado"}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Cliente desde
+                  </p>
+
+                  <p className="mt-1 text-sm">
+                    {formatDate(customer.createdAt)}
+                  </p>
+                </div>
               </div>
-
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Correo
-                </p>
-
-                <p className="mt-1 text-sm">
-                  {customer.email || "Sin correo registrado"}
-                </p>
-              </div>
-
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Teléfono
-                </p>
-
-                <p className="mt-1 text-sm">
-                  {customer.phone || "Sin teléfono registrado"}
-                </p>
-              </div>
-
-              <div>
-                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                  Cliente desde
-                </p>
-
-                <p className="mt-1 text-sm">{formatDate(customer.createdAt)}</p>
-              </div>
-            </div>
+            )}
           </section>
 
           <section className="overflow-hidden rounded-xl border border-zinc-200 bg-white">

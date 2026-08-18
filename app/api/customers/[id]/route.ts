@@ -210,3 +210,146 @@ export async function GET(
     );
   }
 }
+
+export async function PATCH(
+  request: NextRequest,
+  context: {
+    params: Promise<{
+      id: string;
+    }>;
+  },
+) {
+  try {
+    const { id } = await context.params;
+
+    const body = await request.json();
+
+    const businessId =
+      typeof body.businessId === "string" ? body.businessId.trim() : "";
+
+    const firstName =
+      typeof body.firstName === "string" ? body.firstName.trim() : "";
+
+    const lastName =
+      typeof body.lastName === "string" ? body.lastName.trim() : "";
+
+    const email = typeof body.email === "string" ? body.email.trim() : "";
+
+    const phone = typeof body.phone === "string" ? body.phone.trim() : "";
+
+    if (!businessId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "businessId es obligatorio",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!firstName || !lastName) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Nombre y apellido son obligatorios",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const business = await prisma.business.findFirst({
+      where: {
+        id: businessId,
+        isActive: true,
+      },
+
+      select: {
+        id: true,
+      },
+    });
+
+    if (!business) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Negocio no encontrado o inactivo",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    const existingCustomer = await prisma.customer.findFirst({
+      where: {
+        id,
+        businessId,
+      },
+
+      select: {
+        id: true,
+      },
+    });
+
+    if (!existingCustomer) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Cliente no encontrado para este negocio",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    const customer = await prisma.customer.update({
+      where: {
+        id,
+      },
+
+      data: {
+        firstName,
+        lastName,
+
+        email: email || null,
+        phone: phone || null,
+      },
+
+      select: {
+        id: true,
+
+        firstName: true,
+        lastName: true,
+
+        email: true,
+        phone: true,
+
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return NextResponse.json({
+      success: true,
+
+      customer,
+    });
+  } catch (error) {
+    console.error("PATCH /api/customers/[id] error:", error);
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "No fue posible actualizar el cliente",
+      },
+      {
+        status: 500,
+      },
+    );
+  }
+}
