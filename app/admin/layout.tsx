@@ -16,7 +16,7 @@ export default function AdminLayout({
                   Merca Booking
                 </p>
 
-                <p className="mt-0.5 text-xs text-zinc-400">AdministraciÃ³n</p>
+                <p className="mt-0.5 text-xs text-zinc-400">Administración</p>
               </div>
             </div>
 
@@ -52,7 +52,6 @@ export default function AdminLayout({
                   aria-hidden="true"
                 >
                   <circle cx="12" cy="12" r="8" />
-
                   <path d="M12 8v4l3 2" />
                 </svg>
                 Calendario
@@ -78,6 +77,29 @@ export default function AdminLayout({
               </Link>
 
               <Link
+                href="/admin/resources"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <rect x="4" y="4" width="6" height="6" rx="1" />
+
+                  <rect x="14" y="4" width="6" height="6" rx="1" />
+
+                  <rect x="4" y="14" width="6" height="6" rx="1" />
+
+                  <rect x="14" y="14" width="6" height="6" rx="1" />
+                </svg>
+                Inventario
+              </Link>
+
+              <Link
                 href="/admin/customers"
                 className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
               >
@@ -90,6 +112,7 @@ export default function AdminLayout({
                   aria-hidden="true"
                 >
                   <circle cx="12" cy="8" r="3" />
+
                   <path d="M6 20c0-3.5 2.7-6 6-6s6 2.5 6 6" />
                 </svg>
                 Clientes
@@ -112,13 +135,13 @@ export default function AdminLayout({
           <header className="flex h-16 items-center justify-between border-b border-zinc-200 bg-white px-5 sm:px-8">
             <div>
               <p className="text-sm font-medium text-zinc-900">
-                Panel de recepciÃ³n
+                Panel de recepción
               </p>
             </div>
 
             <div className="flex items-center gap-3">
               <div className="hidden text-right sm:block">
-                <p className="text-sm font-medium">RecepciÃ³n Demo</p>
+                <p className="text-sm font-medium">Recepción Demo</p>
 
                 <p className="text-xs text-zinc-500">RECEPTIONIST</p>
               </div>
