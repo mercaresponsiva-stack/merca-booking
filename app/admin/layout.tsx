@@ -59,6 +59,25 @@ export default function AdminLayout({
               </Link>
 
               <Link
+                href="/admin/blocks"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <rect x="5" y="10" width="14" height="10" rx="2" />
+
+                  <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+                </svg>
+                Bloqueos
+              </Link>
+
+              <Link
                 href="/admin/customers"
                 className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
               >

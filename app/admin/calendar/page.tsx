@@ -27,6 +27,8 @@ const ACTIVE_INVENTORY_STATUSES: readonly ReservationStatus[] = [
 
 type CalendarMode = "RESERVATIONS" | "OCCUPANCY";
 
+type BlockScope = "BUSINESS" | "SERVICE" | "RESOURCE_TYPE" | "RESOURCE";
+
 type ReservationItem = {
   id: string;
   confirmationCode: string;
@@ -65,6 +67,60 @@ type ReservationItem = {
       code: string | null;
     }>;
   }>;
+};
+
+type BlockItem = {
+  id: string;
+
+  businessId: string;
+
+  serviceId: string | null;
+  resourceTypeId: string | null;
+  resourceId: string | null;
+
+  startAt: string;
+  endAt: string;
+
+  reason: string | null;
+
+  createdAt: string;
+  updatedAt: string;
+
+  scope: BlockScope;
+
+  service: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
+
+  resourceType: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
+
+  resource: {
+    id: string;
+    name: string;
+    code: string | null;
+    resourceTypeId: string | null;
+  } | null;
+};
+
+type BlocksResponse = {
+  success: true;
+
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalItems: number;
+    totalPages: number;
+    hasPreviousPage: boolean;
+    hasNextPage: boolean;
+  };
+
+  items: BlockItem[];
 };
 
 type ReservationsResponse = {
@@ -178,6 +234,98 @@ function getReservationDateKeys(reservation: ReservationItem) {
   return keys;
 }
 
+function getBlockDateKeys(block: BlockItem) {
+  const startKey = getDateKeyInTimezone(block.startAt);
+
+  const endKey = getDateKeyInTimezone(block.endAt);
+
+  const startDate = parseDateKey(startKey);
+
+  const endDate = parseDateKey(endKey);
+
+  /*
+   * Un Block representa un intervalo
+   * real de indisponibilidad.
+   *
+   * A diferencia de una estancia hotelera,
+   * si termina a mitad de un día, ese día
+   * también está parcialmente bloqueado.
+   *
+   * Solo excluimos el último día cuando
+   * endAt cae exactamente a las 00:00
+   * del negocio.
+   */
+  const endParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TIMEZONE,
+
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+
+    hourCycle: "h23",
+  }).formatToParts(new Date(block.endAt));
+
+  const endHour = Number(
+    endParts.find((part) => part.type === "hour")?.value ?? 0,
+  );
+
+  const endMinute = Number(
+    endParts.find((part) => part.type === "minute")?.value ?? 0,
+  );
+
+  const endSecond = Number(
+    endParts.find((part) => part.type === "second")?.value ?? 0,
+  );
+
+  const endsAtMidnight = endHour === 0 && endMinute === 0 && endSecond === 0;
+
+  const lastDate = endsAtMidnight ? addDays(endDate, -1) : endDate;
+
+  const keys: string[] = [];
+
+  let cursor = startDate;
+
+  while (cursor <= lastDate) {
+    keys.push(dateToKey(cursor));
+
+    cursor = addDays(cursor, 1);
+  }
+
+  return keys;
+}
+
+function getBlockScopeLabel(scope: BlockScope) {
+  switch (scope) {
+    case "BUSINESS":
+      return "Negocio completo";
+
+    case "SERVICE":
+      return "Servicio";
+
+    case "RESOURCE_TYPE":
+      return "Tipo de recurso";
+
+    case "RESOURCE":
+      return "Recurso";
+  }
+}
+
+function getBlockTargetLabel(block: BlockItem) {
+  switch (block.scope) {
+    case "BUSINESS":
+      return "Todo el negocio";
+
+    case "SERVICE":
+      return block.service?.name ?? "Servicio";
+
+    case "RESOURCE_TYPE":
+      return block.resourceType?.name ?? "Tipo de recurso";
+
+    case "RESOURCE":
+      return block.resource?.code || block.resource?.name || "Recurso";
+  }
+}
+
 function getCalendarDays(currentMonth: Date) {
   const firstDay = new Date(
     currentMonth.getFullYear(),
@@ -281,6 +429,10 @@ export default function CalendarPage() {
 
   const [error, setError] = useState<string | null>(null);
 
+  const [blocks, setBlocks] = useState<BlockItem[]>([]);
+
+  const [blocksLoading, setBlocksLoading] = useState(true);
+
   const calendarDays = useMemo(
     () => getCalendarDays(currentMonth),
     [currentMonth],
@@ -352,9 +504,63 @@ export default function CalendarPage() {
     }
   }, [rangeStart, rangeEnd]);
 
+  const loadBlocks = useCallback(async () => {
+    setBlocksLoading(true);
+
+    try {
+      const allItems: BlockItem[] = [];
+
+      let page = 1;
+      let totalPages = 1;
+
+      do {
+        const params = new URLSearchParams({
+          businessId: BUSINESS_ID,
+
+          page: String(page),
+
+          pageSize: "100",
+        });
+
+        const response = await fetch(`/api/blocks?${params.toString()}`, {
+          cache: "no-store",
+        });
+
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            typeof result.error === "string"
+              ? result.error
+              : "No fue posible cargar los bloqueos",
+          );
+        }
+
+        const data = result as BlocksResponse;
+
+        allItems.push(...data.items);
+
+        totalPages = data.pagination.totalPages;
+
+        page += 1;
+      } while (page <= totalPages);
+
+      setBlocks(allItems);
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible cargar los bloqueos",
+      );
+    } finally {
+      setBlocksLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void loadReservations();
-  }, [loadReservations]);
+    void loadBlocks();
+  }, [loadReservations, loadBlocks]);
 
   const availableStatuses = useMemo<readonly ReservationStatus[]>(
     () =>
@@ -405,6 +611,38 @@ export default function CalendarPage() {
 
     return result;
   }, [visibleReservations]);
+
+  const blocksByDate = useMemo(() => {
+    const result = new Map<string, BlockItem[]>();
+
+    for (const block of blocks) {
+      const dateKeys = getBlockDateKeys(block);
+
+      for (const dateKey of dateKeys) {
+        const existing = result.get(dateKey) ?? [];
+
+        existing.push(block);
+
+        result.set(dateKey, existing);
+      }
+    }
+
+    return result;
+  }, [blocks]);
+
+  const visibleBlockCount = useMemo(() => {
+    if (!rangeStart || !rangeEnd) {
+      return 0;
+    }
+
+    return blocks.filter((block) =>
+      getBlockDateKeys(block).some(
+        (dateKey) => dateKey >= rangeStart && dateKey <= rangeEnd,
+      ),
+    ).length;
+  }, [blocks, rangeStart, rangeEnd]);
+
+  const calendarLoading = loading || blocksLoading;
 
   const todayKey = getTodayKey();
 
@@ -551,11 +789,11 @@ export default function CalendarPage() {
             </h2>
 
             <p className="mt-1 text-sm text-zinc-500">
-              {loading
-                ? "Cargando reservas..."
+              {calendarLoading
+                ? "Cargando calendario..."
                 : calendarMode === "OCCUPANCY"
-                  ? `${visibleReservations.length} reserva(s) consumiendo inventario en el rango visible`
-                  : `${visibleReservations.length} reserva(s) en el rango visible`}
+                  ? `${visibleReservations.length} reserva(s) consumiendo inventario · ${visibleBlockCount} bloqueo(s)`
+                  : `${visibleReservations.length} reserva(s) · ${visibleBlockCount} bloqueo(s)`}
             </p>
           </div>
 
@@ -601,6 +839,8 @@ export default function CalendarPage() {
                   const dayReservations =
                     reservationsByDate.get(day.dateKey) ?? [];
 
+                  const dayBlocks = blocksByDate.get(day.dateKey) ?? [];
+
                   const isToday = day.dateKey === todayKey;
 
                   return (
@@ -623,14 +863,42 @@ export default function CalendarPage() {
                           {day.date.getDate()}
                         </span>
 
-                        {dayReservations.length > 0 && (
+                        {dayReservations.length + dayBlocks.length > 0 && (
                           <span className="text-[11px] text-zinc-400">
-                            {dayReservations.length}
+                            {dayReservations.length + dayBlocks.length}
                           </span>
                         )}
                       </div>
 
                       <div className="space-y-2">
+                        {dayBlocks.map((block) => (
+                          <Link
+                            key={`${day.dateKey}-block-${block.id}`}
+                            href={`/admin/blocks#block-${block.id}`}
+                            className="block rounded-lg border border-dashed border-zinc-400 bg-zinc-50 p-2 text-xs transition hover:border-zinc-600 hover:bg-zinc-100"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="font-semibold">Bloqueo</span>
+
+                              <span className="rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium">
+                                {getBlockScopeLabel(block.scope)}
+                              </span>
+                            </div>
+
+                            <p className="mt-1 truncate font-medium">
+                              {getBlockTargetLabel(block)}
+                            </p>
+
+                            <p className="mt-1 line-clamp-2 text-zinc-500">
+                              {block.reason || "Sin motivo registrado"}
+                            </p>
+
+                            <p className="mt-1 text-[10px] font-medium text-zinc-400">
+                              Ver bloqueo →
+                            </p>
+                          </Link>
+                        ))}
+
                         {dayReservations.map((reservation) => {
                           const serviceName =
                             reservation.services[0]?.name ?? "Sin servicio";
@@ -638,6 +906,31 @@ export default function CalendarPage() {
                           const resources = reservation.services.flatMap(
                             (service) => service.resources,
                           );
+
+                          {
+                            dayBlocks.map((block) => (
+                              <div
+                                key={`${day.dateKey}-block-${block.id}`}
+                                className="rounded-lg border border-dashed border-zinc-400 bg-zinc-50 p-2 text-xs"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="font-semibold">Bloqueo</span>
+
+                                  <span className="rounded-full bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium">
+                                    {getBlockScopeLabel(block.scope)}
+                                  </span>
+                                </div>
+
+                                <p className="mt-1 font-medium">
+                                  {getBlockTargetLabel(block)}
+                                </p>
+
+                                <p className="mt-1 line-clamp-2 text-zinc-500">
+                                  {block.reason || "Sin motivo registrado"}
+                                </p>
+                              </div>
+                            ));
+                          }
 
                           const resourceText =
                             resources.length > 0
@@ -685,8 +978,9 @@ export default function CalendarPage() {
                           );
                         })}
 
-                        {!loading &&
+                        {!calendarLoading &&
                           dayReservations.length === 0 &&
+                          dayBlocks.length === 0 &&
                           day.inCurrentMonth && (
                             <span className="text-[11px] text-zinc-300">—</span>
                           )}
