@@ -24,6 +24,8 @@ type HotelAvailabilityInput = {
 
   serviceIds?: string[];
 
+  includeInactiveServices?: boolean;
+
   excludeReservationId?: string;
 
   db?: BookingAvailabilityDb;
@@ -43,6 +45,8 @@ export async function getHotelAvailability({
 
   serviceIds,
 
+  includeInactiveServices = false,
+
   excludeReservationId,
 
   db = prisma,
@@ -57,7 +61,11 @@ export async function getHotelAvailability({
     where: {
       businessId,
 
-      isActive: true,
+      ...(!includeInactiveServices
+        ? {
+            isActive: true,
+          }
+        : {}),
 
       ...(serviceIds
         ? {
@@ -118,6 +126,8 @@ export async function getHotelAvailability({
     endAt,
 
     serviceIds: eligibleServiceIds,
+
+    includeInactiveServices,
 
     excludeReservationId,
 

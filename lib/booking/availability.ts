@@ -42,6 +42,17 @@ export type AvailabilityInput = {
   serviceIds?: string[];
 
   /*
+   * Normalmente un Service inactivo
+   * no debe formar parte de la
+   * disponibilidad vendible.
+   *
+   * Operaciones sobre reservas ya
+   * existentes, como reschedule,
+   * pueden habilitarlo explícitamente.
+   */
+  includeInactiveServices?: boolean;
+
+  /*
    * Fundamental para reprogramación.
    *
    * La reserva que estamos moviendo
@@ -96,6 +107,7 @@ export async function getAvailability({
   startAt,
   endAt,
   serviceIds,
+  includeInactiveServices = false,
   excludeReservationId,
   db = prisma,
 }: AvailabilityInput) {
@@ -138,7 +150,11 @@ export async function getAvailability({
     where: {
       businessId,
 
-      isActive: true,
+      ...(!includeInactiveServices
+        ? {
+            isActive: true,
+          }
+        : {}),
 
       ...(serviceIds
         ? {

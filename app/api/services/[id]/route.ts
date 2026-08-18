@@ -4,299 +4,32 @@ import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
 
 import { prisma } from "@/lib/prisma";
 
-export async function GET(request: NextRequest) {
+type RouteContext = {
+  params: Promise<{
+    id: string;
+  }>;
+};
+
+type CapacityConflict = {
+  id: string;
+
+  confirmationCode: string;
+  status: string;
+
+  guests: number;
+  adults: number | null;
+  children: number | null;
+
+  startAt: Date;
+  endAt: Date;
+
+  violations: string[];
+};
+
+export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { id } = await context.params;
 
-    const businessId = searchParams.get("businessId")?.trim() ?? "";
-
-    const includeInactive = searchParams.get("includeInactive") === "true";
-
-    if (!businessId) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "businessId es obligatorio",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    const business = await prisma.business.findFirst({
-      where: {
-        id: businessId,
-        isActive: true,
-      },
-
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
-
-    /*
-     * CATÁLOGO OPERATIVO
-     *
-     * Mantiene exactamente la finalidad
-     * actual del endpoint:
-     *
-     * - nueva reserva
-     * - bloqueos
-     * - selectores operativos
-     *
-     * Solo devuelve Services activos.
-     */
-    if (!includeInactive) {
-      const services = await prisma.service.findMany({
-        where: {
-          businessId,
-          isActive: true,
-        },
-
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          description: true,
-
-          durationMinutes: true,
-
-          maxPeople: true,
-          maxAdults: true,
-          maxChildren: true,
-        },
-
-        orderBy: {
-          name: "asc",
-        },
-      });
-
-      return NextResponse.json({
-        success: true,
-
-        business,
-
-        includeInactive: false,
-
-        services,
-      });
-    }
-
-    /*
-     * CATÁLOGO ADMINISTRATIVO
-     *
-     * Incluye:
-     *
-     * - Services activos e inactivos
-     * - ResourceTypes requeridos
-     * - inventario físico asociado
-     * - todas las tarifas
-     * - cantidad de reservas activas
-     *
-     * Esta será la fuente de datos de
-     * /admin/services.
-     */
-    const services = await prisma.service.findMany({
-      where: {
-        businessId,
-      },
-
-      select: {
-        id: true,
-        businessId: true,
-
-        name: true,
-        slug: true,
-        description: true,
-
-        durationMinutes: true,
-
-        maxPeople: true,
-        maxAdults: true,
-        maxChildren: true,
-
-        isActive: true,
-
-        createdAt: true,
-        updatedAt: true,
-
-        resourceTypes: {
-          select: {
-            id: true,
-
-            resourceTypeId: true,
-
-            requiredQuantity: true,
-
-            createdAt: true,
-
-            resourceType: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                description: true,
-
-                resources: {
-                  select: {
-                    id: true,
-                    isActive: true,
-                  },
-                },
-              },
-            },
-          },
-
-          orderBy: {
-            resourceType: {
-              name: "asc",
-            },
-          },
-        },
-
-        rates: {
-          select: {
-            id: true,
-
-            name: true,
-
-            startDate: true,
-            endDate: true,
-
-            weekdayPrice: true,
-
-            weekendPrice: true,
-
-            isActive: true,
-
-            createdAt: true,
-            updatedAt: true,
-          },
-
-          orderBy: [
-            {
-              startDate: "desc",
-            },
-            {
-              createdAt: "desc",
-            },
-          ],
-        },
-
-        _count: {
-          select: {
-            reservations: {
-              where: {
-                reservation: {
-                  businessId,
-
-                  status: {
-                    in: [...ACTIVE_RESERVATION_STATUSES],
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-
-      orderBy: {
-        name: "asc",
-      },
-    });
-
-    return NextResponse.json({
-      success: true,
-
-      business,
-
-      includeInactive: true,
-
-      services: services.map((service) => ({
-        id: service.id,
-        businessId: service.businessId,
-
-        name: service.name,
-        slug: service.slug,
-
-        description: service.description,
-
-        durationMinutes: service.durationMinutes,
-
-        maxPeople: service.maxPeople,
-
-        maxAdults: service.maxAdults,
-
-        maxChildren: service.maxChildren,
-
-        isActive: service.isActive,
-
-        createdAt: service.createdAt,
-
-        updatedAt: service.updatedAt,
-
-        activeReservationCount: service._count.reservations,
-
-        resourceTypes: service.resourceTypes.map((requirement) => ({
-          id: requirement.id,
-
-          resourceTypeId: requirement.resourceTypeId,
-
-          requiredQuantity: requirement.requiredQuantity,
-
-          createdAt: requirement.createdAt,
-
-          resourceType: {
-            id: requirement.resourceType.id,
-
-            name: requirement.resourceType.name,
-
-            slug: requirement.resourceType.slug,
-
-            description: requirement.resourceType.description,
-
-            totalResourceCount: requirement.resourceType.resources.length,
-
-            activeResourceCount: requirement.resourceType.resources.filter(
-              (resource) => resource.isActive,
-            ).length,
-          },
-        })),
-
-        rates: service.rates,
-      })),
-    });
-  } catch (error) {
-    console.error("GET /api/services error:", error);
-
-    return NextResponse.json(
-      {
-        success: false,
-        error: "No fue posible obtener los servicios",
-      },
-      {
-        status: 500,
-      },
-    );
-  }
-}
-
-export async function POST(request: NextRequest) {
-  try {
     const body = await request.json();
 
     const businessId =
@@ -332,7 +65,7 @@ export async function POST(request: NextRequest) {
         ? null
         : Number(body.maxChildren);
 
-    const isActive = body.isActive === undefined ? false : body.isActive;
+    const isActive = body.isActive;
 
     if (!businessId) {
       return NextResponse.json(
@@ -474,7 +207,6 @@ export async function POST(request: NextRequest) {
 
           select: {
             id: true,
-            name: true,
           },
         });
 
@@ -482,10 +214,33 @@ export async function POST(request: NextRequest) {
           throw new Error("BUSINESS_NOT_FOUND");
         }
 
+        const service = await tx.service.findFirst({
+          where: {
+            id,
+            businessId,
+          },
+
+          select: {
+            id: true,
+
+            maxPeople: true,
+            maxAdults: true,
+            maxChildren: true,
+          },
+        });
+
+        if (!service) {
+          throw new Error("SERVICE_NOT_FOUND");
+        }
+
         const duplicateSlug = await tx.service.findFirst({
           where: {
             businessId,
             slug,
+
+            id: {
+              not: id,
+            },
           },
 
           select: {
@@ -497,10 +252,140 @@ export async function POST(request: NextRequest) {
           throw new Error("SERVICE_SLUG_ALREADY_EXISTS");
         }
 
-        const service = await tx.service.create({
-          data: {
-            businessId,
+        /*
+         * Solo necesitamos revisar
+         * reservas existentes si alguna
+         * capacidad se vuelve más
+         * restrictiva.
+         */
+        const reducingMaxPeople = maxPeople < service.maxPeople;
 
+        const reducingMaxAdults =
+          maxAdults !== null &&
+          (service.maxAdults === null || maxAdults < service.maxAdults);
+
+        const reducingMaxChildren =
+          maxChildren !== null &&
+          (service.maxChildren === null || maxChildren < service.maxChildren);
+
+        if (reducingMaxPeople || reducingMaxAdults || reducingMaxChildren) {
+          const activeReservationServices =
+            await tx.reservationService.findMany({
+              where: {
+                serviceId: id,
+
+                reservation: {
+                  businessId,
+
+                  status: {
+                    in: [...ACTIVE_RESERVATION_STATUSES],
+                  },
+                },
+              },
+
+              select: {
+                reservation: {
+                  select: {
+                    id: true,
+
+                    confirmationCode: true,
+
+                    status: true,
+
+                    guests: true,
+                    adults: true,
+                    children: true,
+
+                    startAt: true,
+                    endAt: true,
+                  },
+                },
+              },
+
+              orderBy: {
+                reservation: {
+                  startAt: "asc",
+                },
+              },
+            });
+
+          const conflicts: CapacityConflict[] = [];
+
+          for (const item of activeReservationServices) {
+            const reservation = item.reservation;
+
+            const violations: string[] = [];
+
+            if (reservation.guests > maxPeople) {
+              violations.push("MAX_PEOPLE");
+            }
+
+            if (
+              maxAdults !== null &&
+              reservation.adults !== null &&
+              reservation.adults > maxAdults
+            ) {
+              violations.push("MAX_ADULTS");
+            }
+
+            if (
+              maxChildren !== null &&
+              reservation.children !== null &&
+              reservation.children > maxChildren
+            ) {
+              violations.push("MAX_CHILDREN");
+            }
+
+            if (violations.length > 0) {
+              conflicts.push({
+                id: reservation.id,
+
+                confirmationCode: reservation.confirmationCode,
+
+                status: reservation.status,
+
+                guests: reservation.guests,
+
+                adults: reservation.adults,
+
+                children: reservation.children,
+
+                startAt: reservation.startAt,
+
+                endAt: reservation.endAt,
+
+                violations,
+              });
+            }
+          }
+
+          if (conflicts.length > 0) {
+            return {
+              ok: false as const,
+
+              reason: "CAPACITY_CONFLICT" as const,
+
+              reservations: conflicts,
+            };
+          }
+        }
+
+        /*
+         * isActive = false significa:
+         *
+         * - no vender nuevas reservas
+         * - no aparecer en disponibilidad
+         *   normal
+         *
+         * NO significa eliminar ni
+         * invalidar reservas existentes.
+         */
+        const updatedService = await tx.service.update({
+          where: {
+            id,
+          },
+
+          data: {
             name,
             slug,
 
@@ -537,8 +422,9 @@ export async function POST(request: NextRequest) {
         });
 
         return {
-          business,
-          service,
+          ok: true as const,
+
+          service: updatedService,
         };
       },
       {
@@ -546,20 +432,31 @@ export async function POST(request: NextRequest) {
       },
     );
 
-    return NextResponse.json(
-      {
-        success: true,
+    if (!result.ok) {
+      return NextResponse.json(
+        {
+          success: false,
 
-        business: result.business,
+          error:
+            "La nueva capacidad es menor que la requerida por una o más reservas activas.",
 
-        service: result.service,
-      },
-      {
-        status: 201,
-      },
-    );
+          code: "SERVICE_CAPACITY_HAS_ACTIVE_RESERVATION_CONFLICTS",
+
+          reservations: result.reservations,
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+
+      service: result.service,
+    });
   } catch (error) {
-    console.error("POST /api/services error:", error);
+    console.error("PATCH /api/services/[id] error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
@@ -568,6 +465,17 @@ export async function POST(request: NextRequest) {
             {
               success: false,
               error: "Negocio no encontrado o inactivo",
+            },
+            {
+              status: 404,
+            },
+          );
+
+        case "SERVICE_NOT_FOUND":
+          return NextResponse.json(
+            {
+              success: false,
+              error: "Servicio no encontrado para este negocio",
             },
             {
               status: 404,
@@ -611,7 +519,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: "No fue posible crear el servicio",
+        error: "No fue posible actualizar el servicio",
       },
       {
         status: 500,

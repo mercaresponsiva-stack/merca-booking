@@ -333,6 +333,8 @@ export async function PATCH(
 
           serviceIds: [reservationService.serviceId],
 
+          includeInactiveServices: true,
+
           excludeReservationId: reservation.id,
 
           db: tx,

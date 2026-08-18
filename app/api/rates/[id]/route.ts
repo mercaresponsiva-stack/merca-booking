@@ -4,173 +4,20 @@ import { dateOnlyToUtc, isValidDateOnly } from "@/lib/booking/datetime";
 
 import { prisma } from "@/lib/prisma";
 
-export async function GET(request: NextRequest) {
+type RouteContext = {
+  params: Promise<{
+    id: string;
+  }>;
+};
+
+export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
-    const { searchParams } = request.nextUrl;
+    const { id } = await context.params;
 
-    const businessId = searchParams.get("businessId")?.trim() ?? "";
-
-    const serviceId = searchParams.get("serviceId")?.trim() ?? "";
-
-    const includeInactive = searchParams.get("includeInactive") === "true";
-
-    if (!businessId) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "businessId es obligatorio",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    const business = await prisma.business.findFirst({
-      where: {
-        id: businessId,
-        isActive: true,
-      },
-
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
-
-    if (serviceId) {
-      const service = await prisma.service.findFirst({
-        where: {
-          id: serviceId,
-          businessId,
-        },
-
-        select: {
-          id: true,
-        },
-      });
-
-      if (!service) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "Servicio no encontrado para este negocio",
-          },
-          {
-            status: 404,
-          },
-        );
-      }
-    }
-
-    const rates = await prisma.serviceRate.findMany({
-      where: {
-        service: {
-          businessId,
-        },
-
-        ...(serviceId
-          ? {
-              serviceId,
-            }
-          : {}),
-
-        ...(!includeInactive
-          ? {
-              isActive: true,
-            }
-          : {}),
-      },
-
-      select: {
-        id: true,
-        serviceId: true,
-
-        name: true,
-
-        startDate: true,
-        endDate: true,
-
-        weekdayPrice: true,
-        weekendPrice: true,
-
-        isActive: true,
-
-        createdAt: true,
-        updatedAt: true,
-
-        service: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-
-            isActive: true,
-
-            maxPeople: true,
-            maxAdults: true,
-            maxChildren: true,
-          },
-        },
-      },
-
-      orderBy: [
-        {
-          startDate: "desc",
-        },
-        {
-          createdAt: "desc",
-        },
-      ],
-    });
-
-    return NextResponse.json({
-      success: true,
-
-      business,
-
-      serviceId: serviceId || null,
-
-      includeInactive,
-
-      items: rates,
-    });
-  } catch (error) {
-    console.error("GET /api/rates error:", error);
-
-    return NextResponse.json(
-      {
-        success: false,
-        error: "No fue posible obtener las tarifas",
-      },
-      {
-        status: 500,
-      },
-    );
-  }
-}
-
-export async function POST(request: NextRequest) {
-  try {
     const body = await request.json();
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
-
-    const serviceId =
-      typeof body.serviceId === "string" ? body.serviceId.trim() : "";
 
     const name = typeof body.name === "string" ? body.name.trim() : "";
 
@@ -191,18 +38,6 @@ export async function POST(request: NextRequest) {
         {
           success: false,
           error: "businessId es obligatorio",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    if (!serviceId) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "serviceId es obligatorio",
         },
         {
           status: 400,
@@ -303,30 +138,44 @@ export async function POST(request: NextRequest) {
           throw new Error("BUSINESS_NOT_FOUND");
         }
 
-        const service = await tx.service.findFirst({
+        const rate = await tx.serviceRate.findFirst({
           where: {
-            id: serviceId,
-            businessId,
+            id,
+
+            service: {
+              businessId,
+            },
           },
 
           select: {
             id: true,
-            name: true,
-            slug: true,
-            isActive: true,
+            serviceId: true,
+
+            service: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+                isActive: true,
+              },
+            },
           },
         });
 
-        if (!service) {
-          throw new Error("SERVICE_NOT_FOUND");
+        if (!rate) {
+          throw new Error("RATE_NOT_FOUND");
         }
 
         if (isActive) {
           const overlappingRate = await tx.serviceRate.findFirst({
             where: {
-              serviceId,
+              serviceId: rate.serviceId,
 
               isActive: true,
+
+              id: {
+                not: id,
+              },
 
               startDate: {
                 lte: endDate,
@@ -356,10 +205,12 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        const rate = await tx.serviceRate.create({
-          data: {
-            serviceId,
+        const updatedRate = await tx.serviceRate.update({
+          where: {
+            id,
+          },
 
+          data: {
             name,
 
             startDate,
@@ -401,7 +252,7 @@ export async function POST(request: NextRequest) {
 
         return {
           ok: true as const,
-          rate,
+          rate: updatedRate,
         };
       },
       {
@@ -427,17 +278,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
-      {
-        success: true,
-        rate: result.rate,
-      },
-      {
-        status: 201,
-      },
-    );
+    return NextResponse.json({
+      success: true,
+      rate: result.rate,
+    });
   } catch (error) {
-    console.error("POST /api/rates error:", error);
+    console.error("PATCH /api/rates/[id] error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
@@ -452,11 +298,11 @@ export async function POST(request: NextRequest) {
             },
           );
 
-        case "SERVICE_NOT_FOUND":
+        case "RATE_NOT_FOUND":
           return NextResponse.json(
             {
               success: false,
-              error: "Servicio no encontrado para este negocio",
+              error: "Tarifa no encontrada para este negocio",
             },
             {
               status: 404,
@@ -468,7 +314,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        error: "No fue posible crear la tarifa",
+        error: "No fue posible actualizar la tarifa",
       },
       {
         status: 500,
