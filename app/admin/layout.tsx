@@ -100,6 +100,33 @@ export default function AdminLayout({
               </Link>
 
               <Link
+                href="/admin/services"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <path d="M5 6h14" />
+
+                  <path d="M5 12h14" />
+
+                  <path d="M5 18h14" />
+
+                  <circle cx="8" cy="6" r="1.5" />
+
+                  <circle cx="16" cy="12" r="1.5" />
+
+                  <circle cx="10" cy="18" r="1.5" />
+                </svg>
+                Servicios
+              </Link>
+
+              <Link
                 href="/admin/customers"
                 className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
               >

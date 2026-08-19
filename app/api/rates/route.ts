@@ -4,6 +4,12 @@ import { dateOnlyToUtc, isValidDateOnly } from "@/lib/booking/datetime";
 
 import { prisma } from "@/lib/prisma";
 
+function dateOnlyToUtcEndOfDay(value: string) {
+  const date = dateOnlyToUtc(value);
+
+  return new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1);
+}
+
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
@@ -236,7 +242,7 @@ export async function POST(request: NextRequest) {
 
     const startDate = dateOnlyToUtc(startDateInput);
 
-    const endDate = dateOnlyToUtc(endDateInput);
+    const endDate = dateOnlyToUtcEndOfDay(endDateInput);
 
     if (endDate < startDate) {
       return NextResponse.json(

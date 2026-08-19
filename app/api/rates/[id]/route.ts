@@ -9,6 +9,11 @@ type RouteContext = {
     id: string;
   }>;
 };
+function dateOnlyToUtcEndOfDay(value: string) {
+  const date = dateOnlyToUtc(value);
+
+  return new Date(date.getTime() + 24 * 60 * 60 * 1000 - 1);
+}
 
 export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
@@ -71,7 +76,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const startDate = dateOnlyToUtc(startDateInput);
 
-    const endDate = dateOnlyToUtc(endDateInput);
+    const endDate = dateOnlyToUtcEndOfDay(endDateInput);
 
     if (endDate < startDate) {
       return NextResponse.json(

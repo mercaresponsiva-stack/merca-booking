@@ -79,13 +79,35 @@ export async function getHotelAvailability({
         gte: totalGuests,
       },
 
-      maxAdults: {
-        gte: adults,
-      },
+      AND: [
+        {
+          OR: [
+            {
+              maxAdults: null,
+            },
 
-      maxChildren: {
-        gte: children,
-      },
+            {
+              maxAdults: {
+                gte: adults,
+              },
+            },
+          ],
+        },
+
+        {
+          OR: [
+            {
+              maxChildren: null,
+            },
+
+            {
+              maxChildren: {
+                gte: children,
+              },
+            },
+          ],
+        },
+      ],
     },
 
     include: {
