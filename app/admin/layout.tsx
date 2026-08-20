@@ -127,6 +127,26 @@ export default function AdminLayout({
               </Link>
 
               <Link
+                href="/admin/refund-policies"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <path d="M6 3h9l3 3v15H6V3Z" />
+                  <path d="M15 3v4h4" />
+                  <path d="M9 11h6" />
+                  <path d="M9 15h6" />
+                </svg>
+                Políticas de reembolso
+              </Link>
+
+              <Link
                 href="/admin/customers"
                 className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
               >
