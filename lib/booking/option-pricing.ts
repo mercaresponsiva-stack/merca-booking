@@ -13,20 +13,34 @@ export type CalculateOptionPriceInput = {
   includedQuantity: number;
   optionalQuantity: number;
 
-  unitPrice: number;
+  /*
+   * string permite recibir directamente
+   * Prisma Decimal.toString() sin convertir
+   * primero a punto flotante.
+   */
+  unitPrice:
+    number | string;
 
-  pricingBase: OptionPricingBase;
-  pricingFrequency: OptionPricingFrequency;
+  pricingBase:
+    OptionPricingBase;
+
+  pricingFrequency:
+    OptionPricingFrequency;
 
   /*
-   * El Core NO interpreta tiempo.
+   * El Core no interpreta tiempo.
    *
    * Ejemplos:
    *
    * ONCE       -> 1
-   * PER_NIGHT  -> Hotel puede enviar 3
-   * PER_DAY    -> vertical puede enviar 2
-   * PER_HOUR   -> vertical puede enviar 1.5
+   * PER_NIGHT  -> 3
+   * PER_DAY    -> 2
+   * PER_HOUR   -> 0.333333...
+   *
+   * El Core lo normaliza a dos decimales
+   * antes de calcular porque
+   * ReservationOption.billingUnits
+   * se persiste como Decimal(10, 2).
    */
   billingUnits?: number;
 };
@@ -37,26 +51,20 @@ export type OptionPriceCalculation = {
   includedQuantity: number;
   optionalQuantity: number;
 
-  /*
-   * Unidades sobre las que realmente
-   * se aplica unitPrice.
-   *
-   * RESERVATION:
-   *   1 si existe parte opcional.
-   *
-   * QUANTITY:
-   *   optionalQuantity.
-   *
-   * PERSON:
-   *   optionalQuantity.
-   */
   chargeableUnits: number;
 
   unitPrice: number;
 
-  pricingBase: OptionPricingBase;
-  pricingFrequency: OptionPricingFrequency;
+  pricingBase:
+    OptionPricingBase;
 
+  pricingFrequency:
+    OptionPricingFrequency;
+
+  /*
+   * Valor ya normalizado a la misma
+   * precisión que se persistirá.
+   */
   billingUnits: number;
 
   subtotal: number;
@@ -76,21 +84,283 @@ function assertNonNegativeInteger(
   }
 }
 
-function normalizeMoney(
+function assertSafeInteger(
   value: number,
 ) {
+  if (
+    !Number.isSafeInteger(
+      value,
+    )
+  ) {
+    throw new Error(
+      "OPTION_PRICE_OVERFLOW",
+    );
+  }
+
+  return value;
+}
+
+/*
+ * Convierte dinero a centavos.
+ *
+ * Para strings trabajamos directamente
+ * sobre el decimal para evitar pasar
+ * primero por Number.
+ *
+ * Decimal(10,2) entra con amplio margen
+ * dentro de Number.MAX_SAFE_INTEGER.
+ */
+function moneyToCents(
+  value:
+    number | string,
+): number {
+  if (
+    typeof value ===
+    "number"
+  ) {
+    if (
+      !Number.isFinite(
+        value,
+      ) ||
+      value < 0
+    ) {
+      throw new Error(
+        "INVALID_OPTION_UNIT_PRICE",
+      );
+    }
+
+    return assertSafeInteger(
+      Math.round(
+        (
+          value +
+          Number.EPSILON
+        ) *
+          100,
+      ),
+    );
+  }
+
+  const normalized =
+    value.trim();
+
+  if (
+    !/^\d+(?:\.\d+)?$/.test(
+      normalized,
+    )
+  ) {
+    throw new Error(
+      "INVALID_OPTION_UNIT_PRICE",
+    );
+  }
+
+  const [
+    wholePart,
+    fractionPart = "",
+  ] =
+    normalized.split(
+      ".",
+    );
+
+  const whole =
+    Number(
+      wholePart,
+    );
+
+  if (
+    !Number.isSafeInteger(
+      whole,
+    )
+  ) {
+    throw new Error(
+      "OPTION_PRICE_OVERFLOW",
+    );
+  }
+
   /*
-   * Mantiene por ahora precisión
-   * monetaria de 2 decimales.
-   *
-   * Persistencia final seguirá usando
-   * Prisma Decimal.
+   * Necesitamos como mínimo tres
+   * posiciones para poder aplicar
+   * redondeo half-up al centavo.
    */
-  return Math.round(
-    (value +
-      Number.EPSILON) *
-      100,
-  ) / 100;
+  const paddedFraction =
+    fractionPart.padEnd(
+      3,
+      "0",
+    );
+
+  const firstTwoDecimals =
+    Number(
+      paddedFraction.slice(
+        0,
+        2,
+      ),
+    );
+
+  let cents =
+    whole *
+      100 +
+    firstTwoDecimals;
+
+  /*
+   * Tercer decimal >= 5:
+   * redondeamos hacia arriba.
+   */
+  if (
+    Number(
+      paddedFraction[2] ??
+        "0",
+    ) >= 5
+  ) {
+    cents +=
+      1;
+  }
+
+  return assertSafeInteger(
+    cents,
+  );
+}
+
+function centsToMoney(
+  cents: number,
+) {
+  assertSafeInteger(
+    cents,
+  );
+
+  return cents / 100;
+}
+
+/*
+ * billingUnits se almacena como
+ * Decimal(10,2).
+ *
+ * Primero obtenemos las centésimas que
+ * realmente podemos persistir y solo
+ * después calculamos el subtotal.
+ */
+function normalizeBillingUnitsToHundredths(
+  value: number,
+) {
+  if (
+    !Number.isFinite(
+      value,
+    ) ||
+    value <= 0
+  ) {
+    throw new Error(
+      "INVALID_OPTION_BILLING_UNITS",
+    );
+  }
+
+  const hundredths =
+    Math.round(
+      (
+        value +
+        Number.EPSILON
+      ) *
+        100,
+    );
+
+  if (
+    hundredths <= 0 ||
+    !Number.isSafeInteger(
+      hundredths,
+    )
+  ) {
+    throw new Error(
+      "INVALID_OPTION_BILLING_UNITS",
+    );
+  }
+
+  return hundredths;
+}
+
+function multiplySafeIntegers(
+  ...values: number[]
+) {
+  let result =
+    1;
+
+  for (
+    const value of
+    values
+  ) {
+    if (
+      !Number.isSafeInteger(
+        value,
+      )
+    ) {
+      throw new Error(
+        "OPTION_PRICE_OVERFLOW",
+      );
+    }
+
+    result *=
+      value;
+
+    if (
+      !Number.isSafeInteger(
+        result,
+      )
+    ) {
+      throw new Error(
+        "OPTION_PRICE_OVERFLOW",
+      );
+    }
+  }
+
+  return result;
+}
+
+/*
+ * Redondeo half-up de una fracción
+ * formada exclusivamente por enteros.
+ *
+ * Ejemplo:
+ *
+ * 1999 centavos × 3 × 100
+ * -----------------------
+ *           100
+ *
+ * = 5997 centavos.
+ */
+function roundFractionToInteger(
+  numerator: number,
+  denominator: number,
+) {
+  if (
+    !Number.isSafeInteger(
+      numerator,
+    ) ||
+    !Number.isSafeInteger(
+      denominator,
+    ) ||
+    denominator <= 0
+  ) {
+    throw new Error(
+      "OPTION_PRICE_OVERFLOW",
+    );
+  }
+
+  const quotient =
+    Math.floor(
+      numerator /
+        denominator,
+    );
+
+  const remainder =
+    numerator %
+    denominator;
+
+  const rounded =
+    remainder *
+      2 >=
+    denominator
+      ? quotient + 1
+      : quotient;
+
+  return assertSafeInteger(
+    rounded,
+  );
 }
 
 export function calculateOptionPrice({
@@ -127,17 +397,6 @@ export function calculateOptionPrice({
   }
 
   if (
-    !Number.isFinite(
-      unitPrice,
-    ) ||
-    unitPrice < 0
-  ) {
-    throw new Error(
-      "INVALID_OPTION_UNIT_PRICE",
-    );
-  }
-
-  if (
     pricingBase !==
       "RESERVATION" &&
     pricingBase !==
@@ -166,38 +425,49 @@ export function calculateOptionPrice({
   }
 
   /*
-   * ONCE siempre equivale a una sola
-   * unidad temporal.
-   *
-   * El caller no necesita enviarla.
+   * Precio monetario exacto expresado
+   * como centavos enteros.
    */
-  const effectiveBillingUnits =
-    pricingFrequency ===
-    "ONCE"
-      ? 1
-      : billingUnits;
+  const unitPriceCents =
+    moneyToCents(
+      unitPrice,
+    );
+
+  /*
+   * ONCE siempre equivale a 1.00.
+   *
+   * Las demás frecuencias usan el valor
+   * calculado por la vertical, pero ya
+   * normalizado a la precisión de DB.
+   */
+  let billingUnitHundredths:
+    number;
 
   if (
-    effectiveBillingUnits ===
-      undefined ||
-    !Number.isFinite(
-      effectiveBillingUnits,
-    ) ||
-    effectiveBillingUnits <= 0
+    pricingFrequency ===
+    "ONCE"
   ) {
-    throw new Error(
-      "INVALID_OPTION_BILLING_UNITS",
-    );
+    billingUnitHundredths =
+      100;
+  } else {
+    if (
+      billingUnits ===
+      undefined
+    ) {
+      throw new Error(
+        "INVALID_OPTION_BILLING_UNITS",
+      );
+    }
+
+    billingUnitHundredths =
+      normalizeBillingUnitsToHundredths(
+        billingUnits,
+      );
   }
 
   /*
-   * Solo optionalQuantity representa
-   * unidades cobrables.
-   *
-   * includedQuantity sí forma parte de
-   * quantity porque puede consumir
-   * inventario físico, pero no genera
-   * cargo.
+   * includedQuantity puede consumir
+   * inventario, pero no genera cobro.
    */
   let chargeableUnits =
     0;
@@ -224,11 +494,26 @@ export function calculateOptionPrice({
     }
   }
 
-  const subtotal =
-    normalizeMoney(
-      unitPrice *
-        chargeableUnits *
-        effectiveBillingUnits,
+  /*
+   * Todo el cálculo monetario se hace
+   * con enteros:
+   *
+   * unitPriceCents
+   * × chargeableUnits
+   * × billingUnitHundredths
+   * ÷ 100
+   */
+  const subtotalNumerator =
+    multiplySafeIntegers(
+      unitPriceCents,
+      chargeableUnits,
+      billingUnitHundredths,
+    );
+
+  const subtotalCents =
+    roundFractionToInteger(
+      subtotalNumerator,
+      100,
     );
 
   return {
@@ -240,16 +525,20 @@ export function calculateOptionPrice({
     chargeableUnits,
 
     unitPrice:
-      normalizeMoney(
-        unitPrice,
+      centsToMoney(
+        unitPriceCents,
       ),
 
     pricingBase,
     pricingFrequency,
 
     billingUnits:
-      effectiveBillingUnits,
+      billingUnitHundredths /
+      100,
 
-    subtotal,
+    subtotal:
+      centsToMoney(
+        subtotalCents,
+      ),
   };
 }

@@ -1,4 +1,4 @@
-﻿import {
+import {
   calculateOptionPrice,
 } from "@/lib/booking/option-pricing";
 
@@ -624,9 +624,7 @@ export async function quoteHotelServiceOptions({
         optionalQuantity,
 
         unitPrice:
-          Number(
-            serviceOption.price,
-          ),
+          serviceOption.price.toString(),
 
         pricingBase:
           serviceOption
@@ -742,6 +740,3 @@ export async function quoteHotelServiceOptions({
     subtotal,
   };
 }
-
-
-

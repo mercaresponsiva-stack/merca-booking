@@ -1,14 +1,18 @@
 import { calculateHotelPrice } from "@/lib/booking/verticals/hotel/pricing";
+import {
+  quoteHotelServiceOptions,
+  type HotelOptionSelection,
+} from "@/lib/booking/verticals/hotel/option-quote";
+import {
+  assertProspectiveInventoryAvailable,
+  evaluateProspectiveInventory,
+  type ProspectiveInventoryDemand,
+} from "@/lib/booking/prospective-inventory";
+import {
+  getResourceTypeInventoryState,
+} from "@/lib/booking/resource-type-inventory";
 import { isValidDateOnly, zonedDateTimeToUtc } from "@/lib/booking/datetime";
 import {
-  getOverlapWhere,
-  getBlockedResourceIds,
-  isBusinessBlocked,
-  isResourceTypeBlocked,
-  isServiceBlocked,
-} from "@/lib/booking/resource-availability";
-import {
-  ACTIVE_RESERVATION_STATUSES,
   isReservationStatus,
   type ReservationStatus,
 } from "@/lib/booking/reservation-state";
@@ -569,6 +573,190 @@ export async function POST(request: NextRequest) {
 
     const source = (body.source ?? "WEBSITE") as ReservationSource;
 
+    /*
+     * Opciones seleccionadas por el cliente.
+     *
+     * El cliente solamente controla:
+     *
+     * - serviceOptionId
+     * - optionalQuantity
+     * - startAt/endAt opcionales
+     *
+     * NO aceptamos del frontend:
+     *
+     * - unitPrice
+     * - subtotal
+     * - billingUnits
+     * - includedQuantity
+     * - pricingBase
+     * - pricingFrequency
+     */
+    const rawOptions = body.options ?? [];
+
+    if (!Array.isArray(rawOptions)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "options debe ser un arreglo",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const optionSelections: HotelOptionSelection[] = [];
+
+    for (const rawOption of rawOptions) {
+      if (
+        typeof rawOption !== "object" ||
+        rawOption === null ||
+        Array.isArray(rawOption)
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Cada opción debe ser un objeto válido",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      const option = rawOption as Record<string, unknown>;
+
+      const serviceOptionId =
+        typeof option.serviceOptionId === "string"
+          ? option.serviceOptionId.trim()
+          : "";
+
+      const optionalQuantity = Number(
+        option.optionalQuantity,
+      );
+
+      if (
+        !serviceOptionId ||
+        !Number.isInteger(optionalQuantity) ||
+        optionalQuantity < 1
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Cada opción debe incluir serviceOptionId y optionalQuantity válido",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      const rawOptionStartAt =
+        option.startAt;
+
+      const rawOptionEndAt =
+        option.endAt;
+
+      const hasOptionStartAt =
+        rawOptionStartAt !== undefined &&
+        rawOptionStartAt !== null &&
+        rawOptionStartAt !== "";
+
+      const hasOptionEndAt =
+        rawOptionEndAt !== undefined &&
+        rawOptionEndAt !== null &&
+        rawOptionEndAt !== "";
+
+      if (
+        hasOptionStartAt !==
+        hasOptionEndAt
+      ) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Una opción con intervalo propio requiere startAt y endAt",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      let optionStartAt: Date | null =
+        null;
+
+      let optionEndAt: Date | null =
+        null;
+
+      if (
+        hasOptionStartAt &&
+        hasOptionEndAt
+      ) {
+        if (
+          typeof rawOptionStartAt !==
+            "string" ||
+          typeof rawOptionEndAt !==
+            "string"
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                "startAt y endAt de una opción deben ser fechas ISO válidas",
+            },
+            {
+              status: 400,
+            },
+          );
+        }
+
+        optionStartAt =
+          new Date(
+            rawOptionStartAt,
+          );
+
+        optionEndAt =
+          new Date(
+            rawOptionEndAt,
+          );
+
+        if (
+          Number.isNaN(
+            optionStartAt.getTime(),
+          ) ||
+          Number.isNaN(
+            optionEndAt.getTime(),
+          ) ||
+          optionEndAt <=
+            optionStartAt
+        ) {
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                "El intervalo de la opción no es válido",
+            },
+            {
+              status: 400,
+            },
+          );
+        }
+      }
+
+      optionSelections.push({
+        serviceOptionId,
+        optionalQuantity,
+
+        startAt:
+          optionStartAt,
+
+        endAt:
+          optionEndAt,
+      });
+    }
+
     // ─────────────────────────────────────────────
     // 1. REQUIRED FIELDS
     // ─────────────────────────────────────────────
@@ -816,279 +1004,266 @@ export async function POST(request: NextRequest) {
         // weekday / weekend por noche.
         // ─────────────────────────────────────────
 
-        const pricing = calculateHotelPrice(checkIn, checkOut, service.rates);
+        /*
+         * ─────────────────────────────────────────
+         * 8. SERVICE PRICING
+         * ─────────────────────────────────────────
+         */
 
-        const subtotal = pricing.total;
-        const total = subtotal;
+        const pricing = calculateHotelPrice(
+          checkIn,
+          checkOut,
+          service.rates,
+        );
 
-        // ─────────────────────────────────────────
-        // 9. RESOURCE REQUIREMENTS
-        // ─────────────────────────────────────────
+        const serviceSubtotal =
+          pricing.total;
 
-        if (service.resourceTypes.length === 0) {
-          throw new Error("SERVICE_RESOURCE_NOT_CONFIGURED");
-        }
+        /*
+         * ─────────────────────────────────────────
+         * 9. OPTION QUOTE
+         *
+         * Toda la configuración monetaria
+         * proviene de la base de datos.
+         * ─────────────────────────────────────────
+         */
 
-        // ─────────────────────────────────────────
-        // 10. OVERLAPPING RESERVATIONS
-        //
-        // ReservationService representa demanda,
-        // tenga o no Resource físico asignado.
-        // ─────────────────────────────────────────
+        const optionQuote =
+          await quoteHotelServiceOptions({
+            businessId:
+              business.id,
 
-        const overlappingReservationServices =
-          await tx.reservationService.findMany({
-            where: {
-              serviceId: service.id,
+            serviceId:
+              service.id,
 
-              reservation: {
-                businessId: business.id,
+            checkIn,
+            checkOut,
 
-                status: {
-                  in: [...ACTIVE_RESERVATION_STATUSES],
-                },
+            guests,
 
-                ...getOverlapWhere(startAt, endAt),
-              },
-            },
+            selections:
+              optionSelections,
 
-            select: {
-              id: true,
-              quantity: true,
-
-              resources: {
-                select: {
-                  resourceId: true,
-
-                  resource: {
-                    select: {
-                      resourceTypeId: true,
-                    },
-                  },
-                },
-              },
-            },
+            db:
+              tx,
           });
 
-        // ─────────────────────────────────────────
-        // 11. BLOCKS
-        //
-        // Pueden bloquear:
-        //
-        // Business
-        // Service
-        // ResourceType
-        // Resource
-        // ─────────────────────────────────────────
+        const optionSubtotal =
+          optionQuote.subtotal;
 
-        const blocks = await tx.block.findMany({
-          where: {
-            businessId: business.id,
+        const subtotal =
+          Math.round(
+            (
+              serviceSubtotal +
+              optionSubtotal +
+              Number.EPSILON
+            ) *
+              100,
+          ) / 100;
 
-            ...getOverlapWhere(startAt, endAt),
+        const total =
+          subtotal;
 
-            OR: [
-              {
-                serviceId: null,
-              },
-
-              {
-                serviceId: service.id,
-              },
-
-              /*
-               * Un Resource físico bloqueado
-               * debe respetarse aunque el Block
-               * conserve otro serviceId.
-               */
-              {
-                resourceId: {
-                  not: null,
-                },
-              },
-            ],
-          },
-
-          select: {
-            serviceId: true,
-            resourceTypeId: true,
-            resourceId: true,
-          },
-        });
-
-        // ─────────────────────────────────────────
-        // BUSINESS-WIDE BLOCK
-        // ─────────────────────────────────────────
-
-        const businessBlocked = isBusinessBlocked(blocks);
-
-        if (businessBlocked) {
-          throw new Error("SERVICE_NOT_AVAILABLE");
-        }
-
-        // ─────────────────────────────────────────
-        // SERVICE-WIDE BLOCK
-        // ─────────────────────────────────────────
-
-        const serviceBlocked = isServiceBlocked(blocks, service.id);
-
-        if (serviceBlocked) {
-          throw new Error("SERVICE_NOT_AVAILABLE");
-        }
-
-        // ─────────────────────────────────────────
-        // 12. CHECK EACH RESOURCE TYPE
-        // ─────────────────────────────────────────
-
-        const autoAssignResourceIds: string[] = [];
-
-        for (const requirement of service.resourceTypes) {
-          const resourceType = requirement.resourceType;
-
-          const resources = resourceType.resources;
-
-          const requiredQuantity = Math.max(requirement.requiredQuantity, 1);
-
-          if (resources.length === 0) {
-            throw new Error("SERVICE_NOT_AVAILABLE");
-          }
-
-          const currentResourceIds = new Set(
-            resources.map((resource) => resource.id),
+        /*
+         * Hotel V1 necesita al menos
+         * un ResourceType obligatorio
+         * para representar la habitación.
+         */
+        if (
+          service.resourceTypes.length ===
+          0
+        ) {
+          throw new Error(
+            "SERVICE_RESOURCE_NOT_CONFIGURED",
           );
+        }
 
-          // ───────────────────────────────────────
-          // ASSIGNED RESOURCES
-          // ───────────────────────────────────────
+        /*
+         * ─────────────────────────────────────────
+         * 10. PROSPECTIVE INVENTORY DEMAND
+         *
+         * Sumamos la demanda NUEVA antes
+         * de persistir la reserva.
+         *
+         * Esto evita validar Service y Options
+         * de forma independiente cuando comparten
+         * el mismo ResourceType.
+         * ─────────────────────────────────────────
+         */
 
-          const assignedResourceIds = new Set<string>();
+        const prospectiveDemands:
+          ProspectiveInventoryDemand[] =
+          [];
 
-          for (const reservationService of overlappingReservationServices) {
-            for (const reservationResource of reservationService.resources) {
-              if (
-                reservationResource.resource.resourceTypeId ===
-                  resourceType.id &&
-                currentResourceIds.has(reservationResource.resourceId)
-              ) {
-                assignedResourceIds.add(reservationResource.resourceId);
-              }
-            }
+        /*
+         * Demanda obligatoria del Service.
+         *
+         * ReservationService.quantity será 1.
+         */
+        for (
+          const requirement of
+          service.resourceTypes
+        ) {
+          prospectiveDemands.push({
+            resourceTypeId:
+              requirement
+                .resourceTypeId,
+
+            startAt,
+            endAt,
+
+            requiredResources:
+              Math.max(
+                requirement
+                  .requiredQuantity,
+                1,
+              ),
+
+            source:
+              `SERVICE:${service.id}`,
+          });
+        }
+
+        /*
+         * Demanda física de Options.
+         *
+         * Si ReservationOption tiene
+         * intervalo propio, usamos ese.
+         *
+         * Si no, hereda la reserva.
+         */
+        for (
+          const optionItem of
+          optionQuote.items
+        ) {
+          for (
+            const requirement of
+            optionItem.resourceTypes
+          ) {
+            prospectiveDemands.push({
+              resourceTypeId:
+                requirement
+                  .resourceTypeId,
+
+              startAt:
+                optionItem.startAt ??
+                startAt,
+
+              endAt:
+                optionItem.endAt ??
+                endAt,
+
+              requiredResources:
+                requirement
+                  .requiredResources,
+
+              source:
+                `OPTION:${optionItem.serviceOptionId}`,
+            });
           }
+        }
 
-          // ───────────────────────────────────────
-          // UNASSIGNED DEMAND
-          //
-          // Maria:
-          // ReservationService Standard
-          // ReservationResource = ninguno
-          //
-          // Aun así consume 1 habitación.
-          // ───────────────────────────────────────
+        const prospectiveInventory =
+          await evaluateProspectiveInventory({
+            businessId:
+              business.id,
 
-          let unassignedDemand = 0;
+            serviceId:
+              service.id,
 
-          for (const reservationService of overlappingReservationServices) {
-            const assignedForThisType = reservationService.resources.filter(
-              (reservationResource) =>
-                reservationResource.resource.resourceTypeId === resourceType.id,
-            ).length;
+            demands:
+              prospectiveDemands,
 
-            const requiredForReservation =
-              reservationService.quantity * requiredQuantity;
+            db:
+              tx,
+          });
 
-            const missingResources = Math.max(
-              requiredForReservation - assignedForThisType,
-              0,
+        assertProspectiveInventoryAvailable(
+          prospectiveInventory,
+        );
+
+        /*
+         * ─────────────────────────────────────────
+         * 11. AUTOMATIC SERVICE RESOURCE
+         *
+         * Conservamos la regla existente:
+         *
+         * Solo autoasignamos cuando el
+         * ResourceType tiene exactamente
+         * un Resource físico activo y el
+         * Service necesita exactamente uno.
+         *
+         * Las Options NO se autoasignan aquí.
+         * ─────────────────────────────────────────
+         */
+
+        const autoAssignResourceIds:
+          string[] =
+          [];
+
+        for (
+          const requirement of
+          service.resourceTypes
+        ) {
+          const resourceType =
+            requirement.resourceType;
+
+          const requiredQuantity =
+            Math.max(
+              requirement
+                .requiredQuantity,
+              1,
             );
 
-            unassignedDemand += missingResources;
+          if (
+            requiredQuantity !== 1 ||
+            resourceType
+              .resources
+              .length !== 1
+          ) {
+            continue;
           }
 
-          // ───────────────────────────────────────
-          // RESOURCE TYPE BLOCK
-          // ───────────────────────────────────────
+          const onlyResource =
+            resourceType
+              .resources[0];
 
-          const resourceTypeBlocked = isResourceTypeBlocked(
-            blocks,
-            service.id,
-            resourceType.id,
-          );
+          const inventory =
+            await getResourceTypeInventoryState({
+              businessId:
+                business.id,
 
-          if (resourceTypeBlocked) {
-            throw new Error("SERVICE_NOT_AVAILABLE");
-          }
+              resourceTypeId:
+                resourceType.id,
 
-          // ───────────────────────────────────────
-          // SPECIFIC RESOURCE BLOCKS
-          // ───────────────────────────────────────
+              startAt,
+              endAt,
 
-          const blockedResourceIds = getBlockedResourceIds(
-            blocks,
-            currentResourceIds,
-          );
+              serviceId:
+                service.id,
 
-          // ───────────────────────────────────────
-          // PHYSICALLY FREE RESOURCES
-          // ───────────────────────────────────────
-
-          const physicallyFreeResources = resources.filter(
-            (resource) =>
-              !assignedResourceIds.has(resource.id) &&
-              !blockedResourceIds.has(resource.id),
-          );
-
-          // ───────────────────────────────────────
-          // EXISTING UNASSIGNED RESERVATIONS
-          // ALSO CONSUME INVENTORY
-          // ───────────────────────────────────────
-
-          const resourcesAfterPendingDemand = Math.max(
-            physicallyFreeResources.length - unassignedDemand,
-            0,
-          );
-
-          const availableUnits = Math.floor(
-            resourcesAfterPendingDemand / requiredQuantity,
-          );
-
-          if (availableUnits < 1) {
-            throw new Error("SERVICE_NOT_AVAILABLE");
-          }
-
-          // ───────────────────────────────────────
-          // AUTOMATIC RESOURCE ASSIGNMENT
-          //
-          // IMPORTANTE:
-          //
-          // NO:
-          // "solo queda uno libre"
-          //
-          // SÍ:
-          // "el tipo tiene solamente un recurso
-          // físico configurado".
-          //
-          // Suite -> solo 301
-          // => autoasignar 301
-          //
-          // Standard -> 101 + 102
-          // => no autoasignar aunque solo quede
-          // uno disponible.
-          // ───────────────────────────────────────
+              db:
+                tx,
+            });
 
           if (
-            requiredQuantity === 1 &&
-            resources.length === 1 &&
-            physicallyFreeResources.length === 1 &&
-            unassignedDemand === 0
+            inventory
+              .availableResourceIds
+              .includes(
+                onlyResource.id,
+              )
           ) {
-            autoAssignResourceIds.push(resources[0].id);
+            autoAssignResourceIds.push(
+              onlyResource.id,
+            );
           }
         }
 
-        // ─────────────────────────────────────────
-        // 13. CUSTOMER
-        // ─────────────────────────────────────────
-
+        /*
+         * ─────────────────────────────────────────
+         * 12. CUSTOMER
+         * ─────────────────────────────────────────
+         */
         const customer = customerId
           ? await tx.customer.findFirst({
               where: {
@@ -1182,9 +1357,9 @@ export async function POST(request: NextRequest) {
              * La suma exacta weekday/weekend
              * permanece en subtotal.
              */
-            unitPrice: subtotal / pricing.numberOfNights,
+            unitPrice: serviceSubtotal / pricing.numberOfNights,
 
-            subtotal,
+            subtotal: serviceSubtotal,
           },
         });
 
@@ -1192,6 +1367,77 @@ export async function POST(request: NextRequest) {
         // 16. OPTIONAL RESOURCE ASSIGNMENT
         // ─────────────────────────────────────────
 
+        /*
+         * ─────────────────────────────────────────
+         * RESERVATION OPTIONS
+         *
+         * Persistimos snapshots.
+         *
+         * Si la configuración cambia después,
+         * la reserva conserva lo que realmente
+         * fue comprado en este momento.
+         * ─────────────────────────────────────────
+         */
+
+        for (
+          const optionItem of
+          optionQuote.items
+        ) {
+          await tx.reservationOption.create({
+            data: {
+              reservationId:
+                reservation.id,
+
+              reservationServiceId:
+                reservationService.id,
+
+              optionId:
+                optionItem.optionId,
+
+              serviceOptionId:
+                optionItem.serviceOptionId,
+
+              name:
+                optionItem.name,
+
+              description:
+                optionItem.description,
+
+              quantity:
+                optionItem.quantity,
+
+              includedQuantity:
+                optionItem
+                  .includedQuantity,
+
+              optionalQuantity:
+                optionItem
+                  .optionalQuantity,
+
+              unitPrice:
+                optionItem.unitPrice,
+
+              pricingBase:
+                optionItem.pricingBase,
+
+              pricingFrequency:
+                optionItem
+                  .pricingFrequency,
+
+              billingUnits:
+                optionItem.billingUnits,
+
+              subtotal:
+                optionItem.subtotal,
+
+              startAt:
+                optionItem.startAt,
+
+              endAt:
+                optionItem.endAt,
+            },
+          });
+        }
         for (const resourceId of autoAssignResourceIds) {
           await tx.reservationResource.create({
             data: {
@@ -1228,6 +1474,8 @@ export async function POST(request: NextRequest) {
               },
             },
 
+            options: true,
+
             payments: true,
           },
         });
@@ -1239,6 +1487,12 @@ export async function POST(request: NextRequest) {
             numberOfNights: pricing.numberOfNights,
 
             nightlyPrices: pricing.nightlyPrices,
+
+            serviceSubtotal,
+
+            optionSubtotal,
+
+            total,
           },
         };
       },
@@ -1320,6 +1574,59 @@ export async function POST(request: NextRequest) {
             })),
           })),
 
+          options: reservation.options.map((item) => ({
+            id:
+              item.id,
+
+            optionId:
+              item.optionId,
+
+            serviceOptionId:
+              item.serviceOptionId,
+
+            name:
+              item.name,
+
+            description:
+              item.description,
+
+            quantity:
+              item.quantity,
+
+            includedQuantity:
+              item.includedQuantity,
+
+            optionalQuantity:
+              item.optionalQuantity,
+
+            unitPrice:
+              Number(
+                item.unitPrice,
+              ),
+
+            pricingBase:
+              item.pricingBase,
+
+            pricingFrequency:
+              item.pricingFrequency,
+
+            billingUnits:
+              Number(
+                item.billingUnits,
+              ),
+
+            subtotal:
+              Number(
+                item.subtotal,
+              ),
+
+            startAt:
+              item.startAt,
+
+            endAt:
+              item.endAt,
+          })),
+
           payments: reservation.payments,
 
           pricing: result.pricing,
@@ -1330,6 +1637,92 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
+    /*
+     * Inventario insuficiente detectado
+     * durante la validación prospectiva.
+     *
+     * Es un conflicto normal de
+     * disponibilidad, no un error 500.
+     */
+    if (
+      error instanceof Error &&
+      error.message ===
+        "PROSPECTIVE_INVENTORY_NOT_AVAILABLE"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "El servicio o uno de sus complementos ya no tiene inventario suficiente para esas fechas",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+    /*
+     * Errores producidos por una selección
+     * de opciones inválida enviada por el
+     * cliente.
+     */
+    if (
+      error instanceof Error &&
+      [
+        "DUPLICATE_OPTION_SELECTION",
+        "SERVICE_OPTION_NOT_OPTIONAL",
+        "INVALID_OPTIONAL_QUANTITY",
+        "OPTIONAL_QUANTITY_BELOW_MINIMUM",
+        "OPTIONAL_QUANTITY_ABOVE_MAXIMUM",
+        "OPTION_PERSON_QUANTITY_EXCEEDS_GUESTS",
+        "OPTION_INTERVAL_INCOMPLETE",
+        "INVALID_OPTION_INTERVAL",
+        "HOTEL_OPTION_HOURLY_INTERVAL_REQUIRED",
+        "INVALID_OPTION_BILLING_UNITS",
+      ].includes(error.message)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Una o más opciones seleccionadas no son válidas para esta reserva",
+          code: error.message,
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    /*
+     * La configuración pudo cambiar entre
+     * la pantalla de reserva y el POST:
+     *
+     * - opción eliminada
+     * - opción desactivada
+     * - opción ya no disponible durante booking
+     *
+     * Lo tratamos como conflicto 409.
+     */
+    if (
+      error instanceof Error &&
+      [
+        "SERVICE_OPTION_NOT_FOUND",
+        "SERVICE_OPTION_NOT_ACTIVE",
+        "SERVICE_OPTION_NOT_AVAILABLE_DURING_BOOKING",
+      ].includes(error.message)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Una de las opciones seleccionadas ya no está disponible",
+          code: error.message,
+        },
+        {
+          status: 409,
+        },
+      );
+    }
     console.error("POST /api/reservations error:", error);
 
     if (error instanceof Error && error.message === "SERVICE_NOT_FOUND") {
