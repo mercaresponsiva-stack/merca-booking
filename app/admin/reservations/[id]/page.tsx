@@ -534,7 +534,7 @@ type RegisterablePaymentMethod = "BANK_TRANSFER" | "CASH";
 
 type PaymentTargetStatus = "PAID" | "FAILED";
 
-const TEMP_RECEPTION_USER_ID = "cmsr1xt2e0000x8vwk6i0sawb";
+import { DEV_RECEPTION_USER_ID as TEMP_RECEPTION_USER_ID } from "@/lib/config/dev-context";
 
 type ResourceAvailability =
   | "AVAILABLE"

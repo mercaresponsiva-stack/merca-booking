@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
+import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 const BUSINESS_TIMEZONE = "America/El_Salvador";
 

@@ -3,7 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
-const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
+import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 const RESERVATION_STATUSES = [
   "PENDING",

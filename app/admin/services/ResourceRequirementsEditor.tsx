@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
-const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
+import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 type CurrentRequirement = {
   resourceTypeId: string;

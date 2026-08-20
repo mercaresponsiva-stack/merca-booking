@@ -4,7 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import ResourceRequirementsEditor from "./ResourceRequirementsEditor";
 import ServiceRatesEditor from "./ServiceRatesEditor";
 
-const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
+import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 type MoneyValue = string | number;
 

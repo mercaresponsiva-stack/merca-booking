@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-const BUSINESS_ID = "cmsni1uij0000ewvwjzoenugh";
+import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 type PaymentOption = "FULL" | "DEPOSIT_50";
 
