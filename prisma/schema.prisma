@@ -43,6 +43,7 @@ model Business {
   services          Service[]
   resources         Resource[]
   resourceTypes     ResourceType[]
+  options           BusinessOption[]
   schedules         Schedule[]
   availabilityRules AvailabilityRule[]
 
@@ -131,6 +132,7 @@ model Service {
   reservations  ReservationService[]
   rates         ServiceRate[]
   blocks        Block[]
+  options       ServiceOption[]
 
   @@unique([businessId, slug])
   @@index([businessId])
@@ -210,9 +212,10 @@ model ResourceType {
 
   business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
 
-  resources Resource[]
-  services  ServiceResourceType[]
-  blocks    Block[]
+  resources      Resource[]
+  services       ServiceResourceType[]
+  serviceOptions ServiceOptionResourceType[]
+  blocks         Block[]
 
   @@unique([businessId, slug])
   @@index([businessId])
@@ -262,6 +265,175 @@ model ServiceResourceType {
 // Conservamos weekdayPrice y weekendPrice
 // porque el hotel las necesita desde el inicio.
 // ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// BUSINESS OPTION
+// Catalogo configurable del negocio.
+// Puede originarse desde una plantilla de
+// Merca Booking o ser totalmente personalizada.
+// ─────────────────────────────────────────────
+
+model BusinessOption {
+  id         String @id @default(cuid())
+  businessId String
+
+  name        String
+  slug        String
+  description String?
+  category    String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  services     ServiceOption[]
+  reservations ReservationOption[]
+
+  @@unique([businessId, slug])
+  @@index([businessId])
+}
+
+// ─────────────────────────────────────────────
+// SERVICE OPTION
+// Define como se ofrece una opcion en un
+// servicio concreto.
+//
+// Puede ser:
+//   incluida
+//   opcional
+//   incluida + cantidades adicionales
+// ─────────────────────────────────────────────
+
+model ServiceOption {
+  id        String @id @default(cuid())
+  serviceId String
+  optionId  String
+
+  isIncluded Boolean @default(false)
+  isOptional Boolean @default(false)
+
+  // null permite derivar la cantidad incluida
+  // segun pricingBase.
+  // Un numero fija explicitamente la cantidad.
+  includedQuantity Int?
+
+  minOptionalQuantity Int  @default(1)
+  maxOptionalQuantity Int?
+
+  // Precio de la parte opcional/adicional.
+  // Puede ser cero.
+  price Decimal @default(0) @db.Decimal(10, 2)
+
+  pricingBase      OptionPricingBase      @default(RESERVATION)
+  pricingFrequency OptionPricingFrequency @default(ONCE)
+
+  availableDuringBooking Boolean @default(true)
+  availableAfterBooking  Boolean @default(true)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  option BusinessOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  resourceTypes ServiceOptionResourceType[]
+  reservations  ReservationOption[]
+
+  @@unique([serviceId, optionId])
+  @@index([serviceId])
+  @@index([optionId])
+}
+
+// ─────────────────────────────────────────────
+// SERVICE OPTION ↔ RESOURCE TYPE
+// Inventario fisico requerido por una opcion.
+//
+// Varias filas significan AND.
+// ─────────────────────────────────────────────
+
+model ServiceOptionResourceType {
+  id              String @id @default(cuid())
+  serviceOptionId String
+  resourceTypeId  String
+
+  requiredQuantity Int @default(1)
+
+  createdAt DateTime @default(now())
+
+  serviceOption ServiceOption @relation(fields: [serviceOptionId], references: [id], onDelete: Cascade)
+
+  resourceType ResourceType @relation(fields: [resourceTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceOptionId, resourceTypeId])
+  @@index([serviceOptionId])
+  @@index([resourceTypeId])
+}
+
+// ─────────────────────────────────────────────
+// RESERVATION OPTION
+// Snapshot de lo incluido o agregado realmente
+// a una reserva.
+// ─────────────────────────────────────────────
+
+model ReservationOption {
+  id            String @id @default(cuid())
+  reservationId String
+
+  reservationServiceId String?
+  optionId             String?
+  serviceOptionId      String?
+
+  // Snapshot visible.
+  name        String
+  description String?
+
+  quantity Int @default(1)
+
+  includedQuantity Int @default(0)
+  optionalQuantity Int @default(0)
+
+  // Snapshot de precio/configuracion.
+  unitPrice Decimal @default(0) @db.Decimal(10, 2)
+
+  pricingBase      OptionPricingBase
+  pricingFrequency OptionPricingFrequency
+
+  // ONCE normalmente usa 1.
+  // PER_NIGHT / PER_DAY / PER_HOUR conserva
+  // las unidades utilizadas por el calculo.
+  billingUnits Decimal @default(1) @db.Decimal(10, 2)
+
+  subtotal Decimal @default(0) @db.Decimal(10, 2)
+
+  // null/null significa que utiliza el intervalo
+  // general de la reserva.
+  startAt DateTime?
+  endAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reservation Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  reservationService ReservationService? @relation(fields: [reservationServiceId], references: [id], onDelete: SetNull)
+
+  option BusinessOption? @relation(fields: [optionId], references: [id], onDelete: SetNull)
+
+  serviceOption ServiceOption? @relation(fields: [serviceOptionId], references: [id], onDelete: SetNull)
+
+  resources ReservationResource[]
+
+  @@index([reservationId])
+  @@index([reservationServiceId])
+  @@index([optionId])
+  @@index([serviceOptionId])
+}
 
 model ServiceRate {
   id        String @id @default(cuid())
@@ -429,6 +601,7 @@ model Reservation {
 
   services  ReservationService[]
   resources ReservationResource[]
+  options   ReservationOption[]
   payments  Payment[]
 
   cancellation Cancellation?
@@ -466,6 +639,7 @@ model ReservationService {
   service Service @relation(fields: [serviceId], references: [id])
 
   resources ReservationResource[]
+  options   ReservationOption[]
 
   @@index([reservationId])
   @@index([serviceId])
@@ -480,6 +654,7 @@ model ReservationResource {
   id                   String  @id @default(cuid())
   reservationId        String
   reservationServiceId String?
+  reservationOptionId  String?
   resourceId           String
 
   createdAt DateTime @default(now())
@@ -488,11 +663,14 @@ model ReservationResource {
 
   reservationService ReservationService? @relation(fields: [reservationServiceId], references: [id], onDelete: Cascade)
 
+  reservationOption ReservationOption? @relation(fields: [reservationOptionId], references: [id], onDelete: Cascade)
+
   resource Resource @relation(fields: [resourceId], references: [id])
 
   @@unique([reservationId, resourceId])
   @@index([reservationId])
   @@index([reservationServiceId])
+  @@index([reservationOptionId])
   @@index([resourceId])
 }
 
@@ -791,6 +969,19 @@ model ReservationChange {
 // ─────────────────────────────────────────────
 // ENUMS
 // ─────────────────────────────────────────────
+
+enum OptionPricingBase {
+  RESERVATION
+  QUANTITY
+  PERSON
+}
+
+enum OptionPricingFrequency {
+  ONCE
+  PER_NIGHT
+  PER_DAY
+  PER_HOUR
+}
 
 enum ReservationStatus {
   PENDING
