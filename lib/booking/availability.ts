@@ -1,12 +1,12 @@
 import {
-  getBlockedResourceIds,
   getOverlapWhere,
   isBusinessBlocked,
-  isResourceTypeBlocked,
   isServiceBlocked,
 } from "@/lib/booking/resource-availability";
 
-import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
+import {
+  getResourceTypeInventoryState,
+} from "@/lib/booking/resource-type-inventory";
 
 import { prisma } from "@/lib/prisma";
 
@@ -23,7 +23,11 @@ import { prisma } from "@/lib/prisma";
  */
 export type BookingAvailabilityDb = Pick<
   typeof prisma,
-  "service" | "reservationService" | "block"
+  | "service"
+  | "resource"
+  | "reservationService"
+  | "reservationOption"
+  | "block"
 >;
 
 export type AvailabilityInput = {
@@ -214,51 +218,6 @@ export async function getAvailability({
     // OVERLAPPING DEMAND
     // ───────────────────────────────────────────
 
-    const overlappingReservationServices = await db.reservationService.findMany(
-      {
-        where: {
-          serviceId: service.id,
-
-          reservation: {
-            businessId,
-
-            status: {
-              in: [...ACTIVE_RESERVATION_STATUSES],
-            },
-
-            ...getOverlapWhere(startAt, endAt),
-
-            ...(excludeReservationId
-              ? {
-                  id: {
-                    not: excludeReservationId,
-                  },
-                }
-              : {}),
-          },
-        },
-
-        select: {
-          id: true,
-
-          quantity: true,
-
-          resources: {
-            select: {
-              resourceId: true,
-
-              resource: {
-                select: {
-                  resourceTypeId: true,
-                },
-              },
-            },
-          },
-        },
-      },
-    );
-
-    // ───────────────────────────────────────────
     // BLOCKS
     // ───────────────────────────────────────────
 
@@ -323,161 +282,88 @@ export async function getAvailability({
     const resourceAvailability: ResourceTypeAvailability[] = [];
 
     for (const requirement of service.resourceTypes) {
-      const resourceType = requirement.resourceType;
+      const resourceType =
+        requirement.resourceType;
 
-      const resources = resourceType.resources;
-
-      const requiredQuantity = Math.max(requirement.requiredQuantity, 1);
-
-      const totalResources = resources.length;
-
-      if (totalResources === 0) {
-        resourceAvailability.push({
-          resourceTypeId: resourceType.id,
-
-          name: resourceType.name,
-
-          requiredQuantity,
-
-          totalResources: 0,
-
-          assignedResources: 0,
-
-          blockedResources: 0,
-
-          unassignedResourceDemand: 0,
-
-          availableUnits: 0,
-        });
-
-        continue;
-      }
-
-      const resourceIds = new Set(resources.map((resource) => resource.id));
-
-      // ─────────────────────────────────────────
-      // ASSIGNED RESOURCES
-      // ─────────────────────────────────────────
-
-      const assignedResourceIds = new Set<string>();
-
-      for (const reservationService of overlappingReservationServices) {
-        for (const reservationResource of reservationService.resources) {
-          if (
-            reservationResource.resource.resourceTypeId === resourceType.id &&
-            resourceIds.has(reservationResource.resourceId)
-          ) {
-            assignedResourceIds.add(reservationResource.resourceId);
-          }
-        }
-      }
-
-      // ─────────────────────────────────────────
-      // UNASSIGNED DEMAND
-      // ─────────────────────────────────────────
-
-      let unassignedResourceDemand = 0;
-
-      for (const reservationService of overlappingReservationServices) {
-        const assignedForThisType = reservationService.resources.filter(
-          (reservationResource) =>
-            reservationResource.resource.resourceTypeId === resourceType.id,
-        ).length;
-
-        const requiredForReservation =
-          reservationService.quantity * requiredQuantity;
-
-        const missingResources = Math.max(
-          requiredForReservation - assignedForThisType,
-
-          0,
+      const requiredQuantity =
+        Math.max(
+          requirement.requiredQuantity,
+          1,
         );
 
-        unassignedResourceDemand += missingResources;
-      }
+      /*
+       * La fuente de verdad física ya
+       * no vive dentro del Service.
+       *
+       * El ResourceType representa un
+       * pool global que puede estar
+       * siendo consumido por:
+       *
+       * - ReservationService
+       * - ReservationOption
+       * - varios Services distintos
+       *
+       * además de Blocks y asignaciones
+       * físicas concretas.
+       */
+      const inventory =
+        await getResourceTypeInventoryState({
+          businessId,
 
-      // ─────────────────────────────────────────
-      // RESOURCE TYPE BLOCK
-      // ─────────────────────────────────────────
+          resourceTypeId:
+            resourceType.id,
 
-      if (isResourceTypeBlocked(blocks, service.id, resourceType.id)) {
-        resourceAvailability.push({
-          resourceTypeId: resourceType.id,
+          startAt,
+          endAt,
 
-          name: resourceType.name,
+          serviceId:
+            service.id,
 
-          requiredQuantity,
+          excludeReservationId,
 
-          totalResources,
-
-          assignedResources: assignedResourceIds.size,
-
-          blockedResources: totalResources,
-
-          unassignedResourceDemand,
-
-          availableUnits: 0,
+          db,
         });
 
-        continue;
-      }
-
-      // ─────────────────────────────────────────
-      // RESOURCE BLOCKS
-      // ─────────────────────────────────────────
-
-      const blockedResourceIds = getBlockedResourceIds(blocks, resourceIds);
-
-      // ─────────────────────────────────────────
-      // PHYSICALLY FREE RESOURCES
-      // ─────────────────────────────────────────
-
-      const physicallyFreeResources = resources.filter(
-        (resource) =>
-          !assignedResourceIds.has(resource.id) &&
-          !blockedResourceIds.has(resource.id),
-      );
-
       /*
-       * Una ReservationService todavía
-       * sin Resource asignado sigue
-       * consumiendo inventario.
+       * availableResourceCount expresa
+       * unidades físicas todavía libres.
+       *
+       * Si una nueva unidad del Service
+       * requiere más de un Resource del
+       * mismo tipo, dividimos el pool
+       * restante entre ese requisito.
        */
-      const resourcesAfterDemand = Math.max(
-        physicallyFreeResources.length - unassignedResourceDemand,
-
-        0,
-      );
-
-      /*
-       * Un Service podría requerir
-       * más de una unidad del mismo
-       * ResourceType.
-       */
-      const availableUnits = Math.floor(
-        resourcesAfterDemand / requiredQuantity,
-      );
+      const availableUnits =
+        Math.floor(
+          inventory.availableResourceCount /
+            requiredQuantity,
+        );
 
       resourceAvailability.push({
-        resourceTypeId: resourceType.id,
+        resourceTypeId:
+          resourceType.id,
 
-        name: resourceType.name,
+        name:
+          resourceType.name,
 
         requiredQuantity,
 
-        totalResources,
+        totalResources:
+          inventory.totalResources,
 
-        assignedResources: assignedResourceIds.size,
+        assignedResources:
+          inventory.assignedResourceCount,
 
-        blockedResources: blockedResourceIds.size,
+        blockedResources:
+          inventory.blockedResourceCount,
 
-        unassignedResourceDemand,
+        unassignedResourceDemand:
+          inventory.unassignedResourceDemand,
 
         availableUnits,
       });
     }
 
-    // ───────────────────────────────────────────
     // SERVICE AVAILABILITY
     //
     // Si requiere varios ResourceTypes,
