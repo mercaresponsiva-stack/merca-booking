@@ -7,12 +7,24 @@ import { calculateReservationFinancialState } from "@/lib/booking/reservation-fi
 import { evaluateAssignedResourcesForInterval } from "@/lib/booking/resource-interval-check";
 
 import {
+  assertProspectiveInventoryAvailable,
+  evaluateProspectiveInventory,
+  type ProspectiveInventoryDemand,
+} from "@/lib/booking/prospective-inventory";
+
+
+import {
   resolveRescheduleFinancialImpact,
   validateReservationForReschedule,
   validateRescheduleInterval,
 } from "@/lib/booking/reschedule-policy";
 
 import { getHotelAvailability } from "@/lib/booking/verticals/hotel/availability";
+
+import {
+  repriceHotelReservationOptionsForStay,
+} from "@/lib/booking/verticals/hotel/reservation-option-repricing";
+
 
 import { isValidDateOnly, zonedDateTimeToUtc } from "@/lib/booking/datetime";
 
@@ -147,6 +159,30 @@ export async function PATCH(
                 unitPrice: true,
 
                 subtotal: true,
+              },
+            },
+
+            options: {
+              select: {
+                id: true,
+
+                includedQuantity: true,
+
+                optionalQuantity: true,
+
+                unitPrice: true,
+
+                pricingBase: true,
+
+                pricingFrequency: true,
+
+                startAt: true,
+
+                endAt: true,
+              },
+
+              orderBy: {
+                createdAt: "asc",
               },
             },
 
@@ -351,6 +387,216 @@ export async function PATCH(
         if (availableService.available < reservationService.quantity) {
           throw new Error("RESCHEDULE_NO_AVAILABILITY");
         }
+        // ─────────────────────────────────────────────
+        // COMPLETE PROSPECTIVE INVENTORY
+        //
+        // Reemplazamos la demanda persistida de esta
+        // Reservation por toda su demanda futura:
+        //
+        // - Service
+        // - ReservationOptions
+        //
+        // Las demandas que comparten ResourceType
+        // se validan conjuntamente.
+        // ─────────────────────────────────────────────
+
+        const serviceInventoryConfiguration =
+          await tx.service.findFirst({
+            where: {
+              id:
+                reservationService.serviceId,
+
+              businessId:
+                reservation.businessId,
+            },
+
+            select: {
+              resourceTypes: {
+                select: {
+                  resourceTypeId:
+                    true,
+
+                  requiredQuantity:
+                    true,
+                },
+              },
+            },
+          });
+
+        if (
+          !serviceInventoryConfiguration
+        ) {
+          throw new Error(
+            "RESCHEDULE_SERVICE_NOT_FOUND",
+          );
+        }
+
+        const optionInventoryConfiguration =
+          await tx.reservationOption.findMany({
+            where: {
+              reservationId:
+                reservation.id,
+            },
+
+            select: {
+              id:
+                true,
+
+              quantity:
+                true,
+
+              startAt:
+                true,
+
+              endAt:
+                true,
+
+              serviceOption: {
+                select: {
+                  resourceTypes: {
+                    select: {
+                      resourceTypeId:
+                        true,
+
+                      requiredQuantity:
+                        true,
+                    },
+                  },
+                },
+              },
+            },
+          });
+
+        const prospectiveDemands:
+          ProspectiveInventoryDemand[] =
+          [];
+
+        /*
+         * Demanda obligatoria del Service.
+         */
+        for (
+          const requirement of
+          serviceInventoryConfiguration
+            .resourceTypes
+        ) {
+          prospectiveDemands.push({
+            resourceTypeId:
+              requirement.resourceTypeId,
+
+            startAt:
+              newStartAt,
+
+            endAt:
+              newEndAt,
+
+            requiredResources:
+              Math.max(
+                requirement.requiredQuantity,
+                1,
+              ) *
+              reservationService.quantity,
+
+            source:
+              `SERVICE:${reservationService.id}`,
+          });
+        }
+
+        /*
+         * Demanda física de ReservationOptions.
+         *
+         * quantity ya representa:
+         *
+         * includedQuantity
+         * +
+         * optionalQuantity
+         */
+        for (
+          const option of
+          optionInventoryConfiguration
+        ) {
+          const hasOwnStart =
+            option.startAt !==
+            null;
+
+          const hasOwnEnd =
+            option.endAt !==
+            null;
+
+          if (
+            hasOwnStart !==
+            hasOwnEnd
+          ) {
+            throw new Error(
+              "RESERVATION_OPTION_INTERVAL_INCOMPLETE",
+            );
+          }
+
+          if (
+            option.quantity < 1
+          ) {
+            throw new Error(
+              "INVALID_RESERVATION_OPTION_QUANTITY",
+            );
+          }
+
+          for (
+            const requirement of
+            option.serviceOption
+              ?.resourceTypes ??
+            []
+          ) {
+            prospectiveDemands.push({
+              resourceTypeId:
+                requirement.resourceTypeId,
+
+              startAt:
+                option.startAt ??
+                newStartAt,
+
+              endAt:
+                option.endAt ??
+                newEndAt,
+
+              requiredResources:
+                option.quantity *
+                Math.max(
+                  requirement.requiredQuantity,
+                  1,
+                ),
+
+              source:
+                `OPTION:${option.id}`,
+            });
+          }
+        }
+
+        const prospectiveInventory =
+          await evaluateProspectiveInventory({
+            businessId:
+              reservation.businessId,
+
+            serviceId:
+              reservationService.serviceId,
+
+            demands:
+              prospectiveDemands,
+
+            /*
+             * Quitamos la versión persistida de
+             * esta Reservation y la sustituimos
+             * por toda la demanda nueva.
+             */
+            excludeReservationId:
+              reservation.id,
+
+            db:
+              tx,
+          });
+
+        assertProspectiveInventoryAvailable(
+          prospectiveInventory,
+        );
+
 
         // ───────────────────────────────────────
         // 9. EXISTING RESOURCE ASSIGNMENTS
@@ -396,9 +642,72 @@ export async function PATCH(
         // 11. NEW HOTEL PRICE
         // ───────────────────────────────────────
 
-        const newSubtotal = availableService.pricing.total;
+        const newServiceSubtotal =
+          availableService.pricing.total;
 
-        const newTotal = newSubtotal;
+        /*
+         * Los complementos existentes son
+         * snapshots contractuales.
+         *
+         * Conservamos precio, cantidades y
+         * modalidad históricas.
+         *
+         * Solo recalculamos billingUnits
+         * cuando dependen de las nuevas fechas.
+         */
+        const optionRepricing =
+          repriceHotelReservationOptionsForStay({
+            checkIn,
+
+            checkOut,
+
+            timezone:
+              reservation.business.timezone,
+
+            options: reservation.options.map(
+              (option) => ({
+                id:
+                  option.id,
+
+                includedQuantity:
+                  option.includedQuantity,
+
+                optionalQuantity:
+                  option.optionalQuantity,
+
+                unitPrice:
+                  option.unitPrice.toString(),
+
+                pricingBase:
+                  option.pricingBase,
+
+                pricingFrequency:
+                  option.pricingFrequency,
+
+                startAt:
+                  option.startAt,
+
+                endAt:
+                  option.endAt,
+              }),
+            ),
+          });
+
+        const newOptionSubtotal =
+          optionRepricing.subtotal;
+
+        const newSubtotal =
+          Math.round(
+            (
+              newServiceSubtotal +
+              newOptionSubtotal +
+              Number.EPSILON
+            ) *
+              100,
+          ) / 100;
+
+        const newTotal =
+          newSubtotal;
 
         // ───────────────────────────────────────
         // 12. FINANCIAL IMPACT
@@ -491,9 +800,17 @@ export async function PATCH(
               nights: hotelAvailability.nights,
 
               pricing: {
-                nightlyPrices: availableService.pricing.nightlyPrices,
+                nightlyPrices:
+                  availableService.pricing.nightlyPrices,
 
-                total: availableService.pricing.total,
+                serviceSubtotal:
+                  newServiceSubtotal,
+
+                optionSubtotal:
+                  newOptionSubtotal,
+
+                total:
+                  newTotal,
               },
 
               financial: {
@@ -512,6 +829,40 @@ export async function PATCH(
               },
 
               resources: {
+                prospectiveInventory: {
+                  available:
+                    prospectiveInventory.available,
+
+                  segments:
+                    prospectiveInventory.segments.map(
+                      (segment) => ({
+                        resourceTypeId:
+                          segment.resourceTypeId,
+
+                        startAt:
+                          segment.startAt,
+
+                        endAt:
+                          segment.endAt,
+
+                        prospectiveDemand:
+                          segment.prospectiveDemand,
+
+                        availableBeforeDemand:
+                          segment.availableBeforeDemand,
+
+                        availableAfterDemand:
+                          segment.availableAfterDemand,
+
+                        sufficient:
+                          segment.sufficient,
+
+                        sources:
+                          segment.sources,
+                      }),
+                    ),
+                },
+
                 kept: resourceEvaluation.keep.map((assignment) => ({
                   assignmentId: assignment.assignmentId,
 
@@ -584,11 +935,42 @@ export async function PATCH(
           },
 
           data: {
-            unitPrice: newSubtotal / hotelAvailability.nights,
+            unitPrice:
+              newServiceSubtotal /
+              hotelAvailability.nights,
 
-            subtotal: newSubtotal,
+            subtotal:
+              newServiceSubtotal,
           },
         });
+
+        /*
+         * Actualizamos únicamente los valores
+         * derivados del intervalo.
+         *
+         * El resto del snapshot permanece
+         * histórico.
+         */
+        for (
+          const optionItem of
+          optionRepricing.items
+        ) {
+          await tx.reservationOption.update({
+            where: {
+              id:
+                optionItem.id,
+            },
+
+            data: {
+              billingUnits:
+                optionItem.billingUnits,
+
+              subtotal:
+                optionItem.subtotal,
+            },
+          });
+        }
+
 
         // ───────────────────────────────────────
         // 17. RELEASE INVALID RESOURCES
@@ -742,14 +1124,25 @@ export async function PATCH(
           change,
 
           pricing: {
-            nights: hotelAvailability.nights,
+            nights:
+              hotelAvailability.nights,
 
-            nightlyPrices: availableService.pricing.nightlyPrices,
+            nightlyPrices:
+              availableService.pricing.nightlyPrices,
 
-            total: availableService.pricing.total,
+            serviceSubtotal:
+              newServiceSubtotal,
+
+            optionSubtotal:
+              newOptionSubtotal,
+
+            total:
+              newTotal,
           },
 
           resourceEvaluation,
+
+          prospectiveInventory,
 
           financialImpact,
 
@@ -852,11 +1245,23 @@ export async function PATCH(
       },
 
       resources: {
-        kept: result.resourceEvaluation.keep,
+        kept:
+          result.resourceEvaluation.keep,
 
-        released: result.resourceEvaluation.release,
+        released:
+          result.resourceEvaluation.release,
       },
 
+      inventory: {
+        available:
+          result.prospectiveInventory.available,
+
+        segments:
+          result.prospectiveInventory.segments,
+
+        shortages:
+          result.prospectiveInventory.shortages,
+      },
       financialImpact: result.financialImpact,
 
       paymentSummary: result.paymentSummary,
@@ -886,6 +1291,27 @@ export async function PATCH(
     // NOT FOUND
     // ─────────────────────────────────────────────
 
+    if (
+      error instanceof Error &&
+      error.message ===
+        "PROSPECTIVE_INVENTORY_NOT_AVAILABLE"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          code:
+            "PROSPECTIVE_INVENTORY_NOT_AVAILABLE",
+
+          error:
+            "No hay inventario suficiente para reprogramar la reserva con todos sus complementos.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
     if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
       return NextResponse.json(
         {

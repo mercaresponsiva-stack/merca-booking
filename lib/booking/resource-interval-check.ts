@@ -268,6 +268,20 @@ export async function evaluateAssignedResourcesForInterval({
         },
       },
 
+      reservationOption: {
+        select: {
+          startAt: true,
+
+          endAt: true,
+
+          reservationService: {
+            select: {
+              serviceId: true,
+            },
+          },
+        },
+      },
+
       resource: {
         select: {
           id: true,
@@ -283,9 +297,42 @@ export async function evaluateAssignedResourcesForInterval({
   const results: AssignedResourceDisposition[] = [];
 
   for (const assignment of assignments) {
-    const serviceId = assignment.reservationService?.serviceId ?? null;
+    const optionReservationServiceId =
+      assignment.reservationOption
+        ?.reservationService
+        ?.serviceId ??
+      null;
 
-    const resourceTypeId = assignment.resource.resourceTypeId ?? null;
+    const serviceId =
+      assignment.reservationService
+        ?.serviceId ??
+      optionReservationServiceId;
+
+    const resourceTypeId =
+      assignment.resource.resourceTypeId ??
+      null;
+
+    /*
+     * El Resource puede provenir de:
+     *
+     * ReservationService
+     * -> sigue el nuevo intervalo general.
+     *
+     * ReservationOption
+     * -> conserva intervalo propio cuando
+     *    existe.
+     * -> null/null hereda el nuevo intervalo
+     *    general.
+     */
+    const assignmentStartAt =
+      assignment.reservationOption
+        ?.startAt ??
+      startAt;
+
+    const assignmentEndAt =
+      assignment.reservationOption
+        ?.endAt ??
+      endAt;
 
     // ───────────────────────────────────────────
     // INACTIVE RESOURCE
@@ -374,8 +421,11 @@ export async function evaluateAssignedResourcesForInterval({
 
       resourceId: assignment.resourceId,
 
-      startAt,
-      endAt,
+      startAt:
+        assignmentStartAt,
+
+      endAt:
+        assignmentEndAt,
 
       db,
     });
