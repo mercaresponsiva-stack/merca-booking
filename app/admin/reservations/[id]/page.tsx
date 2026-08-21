@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
+import { zonedDateTimeToUtc } from "@/lib/booking/datetime";
+
 type AdminUser = {
   id: string;
   name: string;
@@ -271,6 +273,122 @@ function groupRefunds(refunds: Refund[]): RefundGroup[] {
     (a, b) =>
       new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
   );
+}
+
+type BusinessOptionsCatalogResponse = {
+  success: true;
+
+  items: Array<{
+    id: string;
+    name: string;
+    description: string | null;
+    isActive: boolean;
+
+    services: Array<{
+      id: string;
+
+      isIncluded: boolean;
+      isOptional: boolean;
+
+      minOptionalQuantity: number;
+      maxOptionalQuantity: number | null;
+
+      price: number;
+
+      pricingBase:
+        | "RESERVATION"
+        | "QUANTITY"
+        | "PERSON";
+
+      pricingFrequency:
+        | "ONCE"
+        | "PER_NIGHT"
+        | "PER_DAY"
+        | "PER_HOUR";
+
+      availableAfterBooking: boolean;
+      isActive: boolean;
+
+      service: {
+        id: string;
+        name: string;
+        slug: string;
+        isActive: boolean;
+      };
+
+      resourceTypes: Array<{
+        id: string;
+
+        requiredQuantity: number;
+
+        resourceType: {
+          id: string;
+          name: string;
+          slug: string;
+          activeResourceCount: number;
+        };
+      }>;
+    }>;
+  }>;
+};
+
+type PostBookingOptionChoice = {
+  optionId: string;
+  optionName: string;
+
+  description: string | null;
+
+  serviceOptionId: string;
+
+  isIncluded: boolean;
+
+  minOptionalQuantity: number;
+  maxOptionalQuantity: number | null;
+
+  price: number;
+
+  pricingBase:
+    | "RESERVATION"
+    | "QUANTITY"
+    | "PERSON";
+
+  pricingFrequency:
+    | "ONCE"
+    | "PER_NIGHT"
+    | "PER_DAY"
+    | "PER_HOUR";
+
+  resourceTypes: Array<{
+    resourceTypeId: string;
+
+    name: string;
+
+    requiredQuantity: number;
+
+    activeResourceCount: number;
+  }>;
+};
+
+function localBusinessDateTimeToIso(
+  value: string,
+  timezone: string,
+) {
+  const match =
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(
+      value,
+    );
+
+  if (!match) {
+    throw new Error(
+      "La fecha y hora del complemento no es válida.",
+    );
+  }
+
+  return zonedDateTimeToUtc(
+    match[1],
+    match[2],
+    timezone,
+  ).toISOString();
 }
 
 type ReservationDetailResponse = {
@@ -851,6 +969,41 @@ export default function ReservationDetailPage() {
   const [rescheduleResult, setRescheduleResult] =
     useState<RescheduleResponse | null>(null);
 
+  const [optionDialogOpen, setOptionDialogOpen] = useState(false);
+
+  const [postBookingOptions, setPostBookingOptions] =
+    useState<PostBookingOptionChoice[]>([]);
+
+  const [optionCatalogLoading, setOptionCatalogLoading] =
+    useState(false);
+
+  const [selectedPostBookingOptionId, setSelectedPostBookingOptionId] =
+    useState("");
+
+  const [optionQuantity, setOptionQuantity] =
+    useState("1");
+
+  const [optionOwnInterval, setOptionOwnInterval] =
+    useState(false);
+
+  const [optionStartAt, setOptionStartAt] =
+    useState("");
+
+  const [optionEndAt, setOptionEndAt] =
+    useState("");
+
+  const [optionAddReason, setOptionAddReason] =
+    useState("");
+
+  const [optionAddSubmitting, setOptionAddSubmitting] =
+    useState(false);
+
+  const [optionAddError, setOptionAddError] =
+    useState<string | null>(null);
+
+  const [optionAddSuccess, setOptionAddSuccess] =
+    useState<string | null>(null);
+
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
 
   const [paymentMethod, setPaymentMethod] = useState<
@@ -1362,6 +1515,533 @@ export default function ReservationDetailPage() {
     }
   }
 
+  function getExistingOptionalQuantity(
+    serviceOptionId: string,
+  ) {
+    if (!data) {
+      return 0;
+    }
+
+    return data.options
+      .filter(
+        (option) =>
+          option.serviceOptionId ===
+          serviceOptionId,
+      )
+      .reduce(
+        (sum, option) =>
+          sum +
+          option.optionalQuantity,
+        0,
+      );
+  }
+
+  function initializeOptionSelection(
+    choice: PostBookingOptionChoice,
+  ) {
+    const existingOptionalQuantity =
+      getExistingOptionalQuantity(
+        choice.serviceOptionId,
+      );
+
+    const minimumAdditionalQuantity =
+      Math.max(
+        choice.minOptionalQuantity -
+          existingOptionalQuantity,
+        1,
+      );
+
+    setSelectedPostBookingOptionId(
+      choice.serviceOptionId,
+    );
+
+    setOptionQuantity(
+      String(
+        minimumAdditionalQuantity,
+      ),
+    );
+
+    const requiresOwnInterval =
+      choice.pricingFrequency ===
+      "PER_HOUR";
+
+    setOptionOwnInterval(
+      requiresOwnInterval,
+    );
+
+    setOptionStartAt("");
+    setOptionEndAt("");
+  }
+
+  async function openOptionDialog() {
+    if (!data) {
+      return;
+    }
+
+    if (
+      data.services.length !==
+      1
+    ) {
+      setOptionAddError(
+        "Esta versión de Hotel solo permite agregar complementos cuando la reserva tiene un único servicio.",
+      );
+
+      return;
+    }
+
+    setOptionDialogOpen(true);
+
+    setOptionCatalogLoading(true);
+
+    setOptionAddError(null);
+    setOptionAddSuccess(null);
+
+    setPostBookingOptions([]);
+
+    setSelectedPostBookingOptionId("");
+
+    setOptionQuantity("1");
+
+    setOptionOwnInterval(false);
+
+    setOptionStartAt("");
+    setOptionEndAt("");
+
+    setOptionAddReason("");
+
+    try {
+      const response =
+        await fetch(
+          `/api/business-options?businessId=${encodeURIComponent(
+            data.business.id,
+          )}`,
+          {
+            method: "GET",
+            cache: "no-store",
+          },
+        );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+            "string"
+            ? result.error
+            : "No fue posible cargar los complementos disponibles.",
+        );
+      }
+
+      const catalog =
+        result as BusinessOptionsCatalogResponse;
+
+      const reservedService =
+        data.services[0];
+
+      const choices:
+        PostBookingOptionChoice[] =
+        [];
+
+      for (
+        const option of
+        catalog.items
+      ) {
+        if (!option.isActive) {
+          continue;
+        }
+
+        for (
+          const serviceOption of
+          option.services
+        ) {
+          if (
+            serviceOption.service.id !==
+              reservedService.serviceId ||
+            !serviceOption.service.isActive ||
+            !serviceOption.isActive ||
+            !serviceOption.isOptional ||
+            !serviceOption.availableAfterBooking
+          ) {
+            continue;
+          }
+
+          const existingOptionalQuantity =
+            getExistingOptionalQuantity(
+              serviceOption.id,
+            );
+
+          if (
+            serviceOption.maxOptionalQuantity !==
+              null &&
+            existingOptionalQuantity >=
+              serviceOption.maxOptionalQuantity
+          ) {
+            continue;
+          }
+
+          choices.push({
+            optionId:
+              option.id,
+
+            optionName:
+              option.name,
+
+            description:
+              option.description,
+
+            serviceOptionId:
+              serviceOption.id,
+
+            isIncluded:
+              serviceOption.isIncluded,
+
+            minOptionalQuantity:
+              serviceOption.minOptionalQuantity,
+
+            maxOptionalQuantity:
+              serviceOption.maxOptionalQuantity,
+
+            price:
+              serviceOption.price,
+
+            pricingBase:
+              serviceOption.pricingBase,
+
+            pricingFrequency:
+              serviceOption.pricingFrequency,
+
+            resourceTypes:
+              serviceOption.resourceTypes.map(
+                (requirement) => ({
+                  resourceTypeId:
+                    requirement.resourceType.id,
+
+                  name:
+                    requirement.resourceType.name,
+
+                  requiredQuantity:
+                    requirement.requiredQuantity,
+
+                  activeResourceCount:
+                    requirement.resourceType
+                      .activeResourceCount,
+                }),
+              ),
+          });
+        }
+      }
+
+      setPostBookingOptions(
+        choices,
+      );
+
+      if (
+        choices.length >
+        0
+      ) {
+        initializeOptionSelection(
+          choices[0],
+        );
+      }
+    } catch (error) {
+      setOptionAddError(
+        error instanceof
+          Error
+          ? error.message
+          : "No fue posible cargar los complementos disponibles.",
+      );
+    } finally {
+      setOptionCatalogLoading(false);
+    }
+  }
+
+  function handlePostBookingOptionSelection(
+    serviceOptionId: string,
+  ) {
+    const choice =
+      postBookingOptions.find(
+        (option) =>
+          option.serviceOptionId ===
+          serviceOptionId,
+      );
+
+    if (!choice) {
+      setSelectedPostBookingOptionId("");
+
+      return;
+    }
+
+    initializeOptionSelection(
+      choice,
+    );
+
+    setOptionAddError(null);
+  }
+
+  async function handleAddReservationOption() {
+    if (!data) {
+      return;
+    }
+
+    if (
+      data.services.length !==
+      1
+    ) {
+      setOptionAddError(
+        "Esta versión de Hotel solo permite agregar complementos cuando la reserva tiene un único servicio.",
+      );
+
+      return;
+    }
+
+    const selectedOption =
+      postBookingOptions.find(
+        (option) =>
+          option.serviceOptionId ===
+          selectedPostBookingOptionId,
+      );
+
+    if (!selectedOption) {
+      setOptionAddError(
+        "Selecciona un complemento.",
+      );
+
+      return;
+    }
+
+    const quantity =
+      Number(
+        optionQuantity,
+      );
+
+    if (
+      !Number.isInteger(
+        quantity,
+      ) ||
+      quantity <
+        1
+    ) {
+      setOptionAddError(
+        "La cantidad debe ser un número entero mayor que cero.",
+      );
+
+      return;
+    }
+
+    const existingOptionalQuantity =
+      getExistingOptionalQuantity(
+        selectedOption.serviceOptionId,
+      );
+
+    const accumulatedOptionalQuantity =
+      existingOptionalQuantity +
+      quantity;
+
+    if (
+      accumulatedOptionalQuantity <
+      selectedOption
+        .minOptionalQuantity
+    ) {
+      setOptionAddError(
+        `La cantidad opcional acumulada debe ser al menos ${selectedOption.minOptionalQuantity}.`,
+      );
+
+      return;
+    }
+
+    if (
+      selectedOption
+        .maxOptionalQuantity !==
+        null &&
+      accumulatedOptionalQuantity >
+        selectedOption
+          .maxOptionalQuantity
+    ) {
+      setOptionAddError(
+        `La cantidad máxima acumulada para este complemento es ${selectedOption.maxOptionalQuantity}.`,
+      );
+
+      return;
+    }
+
+    if (
+      selectedOption.pricingBase ===
+        "PERSON" &&
+      accumulatedOptionalQuantity >
+        data.reservation.guests
+    ) {
+      setOptionAddError(
+        "La cantidad seleccionada no puede superar la cantidad de huéspedes de la reserva.",
+      );
+
+      return;
+    }
+
+    const requiresOwnInterval =
+      selectedOption
+        .pricingFrequency ===
+      "PER_HOUR";
+
+    const useOwnInterval =
+      requiresOwnInterval ||
+      optionOwnInterval;
+
+    let startAt:
+      string | undefined;
+
+    let endAt:
+      string | undefined;
+
+    if (
+      useOwnInterval
+    ) {
+      if (
+        !optionStartAt ||
+        !optionEndAt
+      ) {
+        setOptionAddError(
+          requiresOwnInterval
+            ? "Este complemento por hora requiere fecha y hora de inicio y fin."
+            : "Completa la fecha y hora de inicio y fin del intervalo.",
+        );
+
+        return;
+      }
+
+      try {
+        startAt =
+          localBusinessDateTimeToIso(
+            optionStartAt,
+            data.business.timezone,
+          );
+
+        endAt =
+          localBusinessDateTimeToIso(
+            optionEndAt,
+            data.business.timezone,
+          );
+      } catch (error) {
+        setOptionAddError(
+          error instanceof
+            Error
+            ? error.message
+            : "El intervalo del complemento no es válido.",
+        );
+
+        return;
+      }
+
+      if (
+        new Date(endAt) <=
+        new Date(startAt)
+      ) {
+        setOptionAddError(
+          "La fecha y hora final debe ser posterior a la inicial.",
+        );
+
+        return;
+      }
+    }
+
+    setOptionAddSubmitting(true);
+
+    setOptionAddError(null);
+    setOptionAddSuccess(null);
+
+    try {
+      const response =
+        await fetch(
+          `/api/reservations/${reservationId}/options`,
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                changedById:
+                  TEMP_RECEPTION_USER_ID,
+
+                reason:
+                  optionAddReason.trim() ||
+                  undefined,
+
+                options: [
+                  {
+                    reservationServiceId:
+                      data.services[0].id,
+
+                    serviceOptionId:
+                      selectedOption
+                        .serviceOptionId,
+
+                    optionalQuantity:
+                      quantity,
+
+                    ...(startAt &&
+                    endAt
+                      ? {
+                          startAt,
+                          endAt,
+                        }
+                      : {}),
+                  },
+                ],
+              }),
+          },
+        );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+            "string"
+            ? result.error
+            : "No fue posible agregar el complemento.",
+        );
+      }
+
+      const addedName =
+        selectedOption
+          .optionName;
+
+      setOptionDialogOpen(false);
+
+      setOptionAddSuccess(
+        `${addedName} agregado correctamente.`,
+      );
+
+      setSelectedPostBookingOptionId("");
+
+      setOptionQuantity("1");
+
+      setOptionOwnInterval(false);
+
+      setOptionStartAt("");
+      setOptionEndAt("");
+
+      setOptionAddReason("");
+
+      await loadReservation();
+    } catch (error) {
+      setOptionAddError(
+        error instanceof
+          Error
+          ? error.message
+          : "No fue posible agregar el complemento.",
+      );
+    } finally {
+      setOptionAddSubmitting(false);
+    }
+  }
+
   function openRefundGroupDialog(
     group: RefundGroup,
     targetStatus: RefundAdminTargetStatus,
@@ -1560,6 +2240,54 @@ export default function ReservationDetailPage() {
     data;
 
   const refundGroups = groupRefunds(data.refunds);
+
+  const canAddOptions =
+    (
+      reservation.status ===
+        "PENDING" ||
+      reservation.status ===
+        "CONFIRMED" ||
+      reservation.status ===
+        "CHECKED_IN"
+    ) &&
+    data.services.length ===
+      1;
+
+  const selectedPostBookingOption =
+    postBookingOptions.find(
+      (option) =>
+        option.serviceOptionId ===
+        selectedPostBookingOptionId,
+    ) ??
+    null;
+
+  const selectedExistingOptionalQuantity =
+    selectedPostBookingOption
+      ? getExistingOptionalQuantity(
+          selectedPostBookingOption
+            .serviceOptionId,
+        )
+      : 0;
+
+  const selectedMaximumAdditionalQuantity =
+    selectedPostBookingOption
+      ?.maxOptionalQuantity ===
+      null ||
+    selectedPostBookingOption
+      ?.maxOptionalQuantity ===
+      undefined
+      ? null
+      : Math.max(
+          selectedPostBookingOption
+            .maxOptionalQuantity -
+            selectedExistingOptionalQuantity,
+          0,
+        );
+
+  const selectedRequiresOwnInterval =
+    selectedPostBookingOption
+      ?.pricingFrequency ===
+    "PER_HOUR";
 
   const canCancelReservation =
     (reservation.status === "PENDING" || reservation.status === "CONFIRMED") &&
@@ -2081,9 +2809,44 @@ export default function ReservationDetailPage() {
           </section>
 
           <section className="rounded-xl border border-zinc-200 bg-white">
-            <div className="border-b border-zinc-200 px-5 py-4">
-              <h2 className="font-semibold">Complementos</h2>
+            <div className="flex flex-col justify-between gap-3 border-b border-zinc-200 px-5 py-4 sm:flex-row sm:items-center">
+              <div>
+                <h2 className="font-semibold">Complementos</h2>
+
+                <p className="mt-1 text-sm text-zinc-500">
+                  Opciones incluidas y adicionales asociadas a esta reserva.
+                </p>
+              </div>
+
+              {canAddOptions && (
+                <button
+                  type="button"
+                  disabled={financialState.hasRefundPending}
+                  onClick={() => void openOptionDialog()}
+                  className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  + Agregar complemento
+                </button>
+              )}
             </div>
+
+            {financialState.hasRefundPending && canAddOptions && (
+              <div className="border-b border-amber-200 bg-amber-50 px-5 py-3 text-sm text-amber-800">
+                No se pueden agregar complementos mientras exista una devolución pendiente o en proceso.
+              </div>
+            )}
+
+            {optionAddSuccess && (
+              <div className="border-b border-emerald-200 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">
+                {optionAddSuccess}
+              </div>
+            )}
+
+            {!optionDialogOpen && optionAddError && (
+              <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+                {optionAddError}
+              </div>
+            )}
 
             {data.options.length === 0 ? (
               <p className="p-5 text-sm text-zinc-500">
@@ -2219,6 +2982,353 @@ export default function ReservationDetailPage() {
               </div>
             )}
           </section>
+          {optionDialogOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+              <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white shadow-xl">
+                <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4">
+                  <div>
+                    <h2 className="font-semibold">
+                      Agregar complemento
+                    </h2>
+
+                    <p className="mt-1 text-sm text-zinc-500">
+                      El precio final y el inventario serán validados nuevamente por el servidor.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={optionAddSubmitting}
+                    onClick={() => {
+                      setOptionDialogOpen(false);
+                      setOptionAddError(null);
+                    }}
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-sm disabled:opacity-50"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+
+                <div className="space-y-5 p-5">
+                  {optionCatalogLoading ? (
+                    <p className="text-sm text-zinc-500">
+                      Cargando complementos disponibles...
+                    </p>
+                  ) : postBookingOptions.length === 0 ? (
+                    <p className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-600">
+                      No hay complementos adicionales disponibles para este servicio.
+                    </p>
+                  ) : (
+                    <>
+                      <div>
+                        <label
+                          htmlFor="post-booking-option"
+                          className="text-sm font-medium"
+                        >
+                          Complemento
+                        </label>
+
+                        <select
+                          id="post-booking-option"
+                          value={selectedPostBookingOptionId}
+                          disabled={optionAddSubmitting}
+                          onChange={(event) =>
+                            handlePostBookingOptionSelection(
+                              event.target.value,
+                            )
+                          }
+                          className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm"
+                        >
+                          {postBookingOptions.map((option) => (
+                            <option
+                              key={option.serviceOptionId}
+                              value={option.serviceOptionId}
+                            >
+                              {option.optionName}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {selectedPostBookingOption && (
+                        <div className="rounded-lg bg-zinc-50 p-4">
+                          <div className="flex flex-col justify-between gap-3 sm:flex-row">
+                            <div>
+                              <p className="font-medium">
+                                {selectedPostBookingOption.optionName}
+                              </p>
+
+                              {selectedPostBookingOption.description && (
+                                <p className="mt-1 text-sm text-zinc-500">
+                                  {selectedPostBookingOption.description}
+                                </p>
+                              )}
+                            </div>
+
+                            <div className="sm:text-right">
+                              <p className="font-medium">
+                                {formatMoney(
+                                  selectedPostBookingOption.price,
+                                  business.currency,
+                                )}
+                              </p>
+
+                              <p className="mt-1 text-xs text-zinc-500">
+                                Precio configurado
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 space-y-1 text-sm text-zinc-600">
+                            <p>
+                              Modalidad:{" "}
+                              {selectedPostBookingOption.pricingBase.replaceAll(
+                                "_",
+                                " ",
+                              )}{" "}
+                              ·{" "}
+                              {selectedPostBookingOption.pricingFrequency.replaceAll(
+                                "_",
+                                " ",
+                              )}
+                            </p>
+
+                            <p>
+                              Cantidad opcional ya registrada:{" "}
+                              {selectedExistingOptionalQuantity}
+                            </p>
+
+                            <p>
+                              Mínimo acumulado:{" "}
+                              {selectedPostBookingOption.minOptionalQuantity}
+                            </p>
+
+                            <p>
+                              Máximo acumulado:{" "}
+                              {selectedPostBookingOption.maxOptionalQuantity ??
+                                "Sin límite configurado"}
+                            </p>
+
+                            {selectedPostBookingOption.isIncluded && (
+                              <p>
+                                La cantidad incluida original no volverá a generarse.
+                              </p>
+                            )}
+
+                            {selectedPostBookingOption.resourceTypes.length > 0 && (
+                              <div className="pt-2">
+                                <p className="font-medium">
+                                  Inventario físico requerido
+                                </p>
+
+                                <ul className="mt-1 list-disc space-y-1 pl-5">
+                                  {selectedPostBookingOption.resourceTypes.map(
+                                    (requirement) => (
+                                      <li key={requirement.resourceTypeId}>
+                                        {requirement.name}:{" "}
+                                        {requirement.requiredQuantity} por unidad ·{" "}
+                                        {requirement.activeResourceCount} recurso(s) activo(s)
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <label
+                          htmlFor="post-booking-option-quantity"
+                          className="text-sm font-medium"
+                        >
+                          Cantidad a agregar
+                        </label>
+
+                        <input
+                          id="post-booking-option-quantity"
+                          type="number"
+                          min={1}
+                          max={
+                            selectedMaximumAdditionalQuantity ??
+                            undefined
+                          }
+                          step={1}
+                          value={optionQuantity}
+                          disabled={optionAddSubmitting}
+                          onChange={(event) =>
+                            setOptionQuantity(
+                              event.target.value,
+                            )
+                          }
+                          className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm"
+                        />
+
+                        {selectedMaximumAdditionalQuantity !== null && (
+                          <p className="mt-1 text-xs text-zinc-500">
+                            Máximo disponible según configuración:{" "}
+                            {selectedMaximumAdditionalQuantity} unidad(es) adicionales.
+                          </p>
+                        )}
+                      </div>
+
+                      {selectedRequiresOwnInterval ? (
+                        <div className="rounded-lg border border-zinc-200 p-4">
+                          <p className="text-sm font-medium">
+                            Intervalo requerido
+                          </p>
+
+                          <p className="mt-1 text-xs text-zinc-500">
+                            Este complemento se cobra por hora y necesita fecha y hora de inicio y fin.
+                          </p>
+                        </div>
+                      ) : (
+                        <label className="flex items-start gap-3 rounded-lg border border-zinc-200 p-4">
+                          <input
+                            type="checkbox"
+                            checked={optionOwnInterval}
+                            disabled={optionAddSubmitting}
+                            onChange={(event) =>
+                              setOptionOwnInterval(
+                                event.target.checked,
+                              )
+                            }
+                            className="mt-1"
+                          />
+
+                          <span>
+                            <span className="block text-sm font-medium">
+                              Usar un intervalo específico
+                            </span>
+
+                            <span className="mt-1 block text-xs text-zinc-500">
+                              Si no se activa, heredará el intervalo completo de la reserva.
+                            </span>
+                          </span>
+                        </label>
+                      )}
+
+                      {(selectedRequiresOwnInterval ||
+                        optionOwnInterval) && (
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div>
+                            <label
+                              htmlFor="post-booking-option-start"
+                              className="text-sm font-medium"
+                            >
+                              Inicio
+                            </label>
+
+                            <input
+                              id="post-booking-option-start"
+                              type="datetime-local"
+                              value={optionStartAt}
+                              disabled={optionAddSubmitting}
+                              onChange={(event) =>
+                                setOptionStartAt(
+                                  event.target.value,
+                                )
+                              }
+                              className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm"
+                            />
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="post-booking-option-end"
+                              className="text-sm font-medium"
+                            >
+                              Fin
+                            </label>
+
+                            <input
+                              id="post-booking-option-end"
+                              type="datetime-local"
+                              value={optionEndAt}
+                              disabled={optionAddSubmitting}
+                              onChange={(event) =>
+                                setOptionEndAt(
+                                  event.target.value,
+                                )
+                              }
+                              className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm"
+                            />
+                          </div>
+
+                          <p className="text-xs text-zinc-500 sm:col-span-2">
+                            Zona horaria: {business.timezone}.
+                          </p>
+                        </div>
+                      )}
+
+                      <div>
+                        <label
+                          htmlFor="post-booking-option-reason"
+                          className="text-sm font-medium"
+                        >
+                          Motivo o nota
+                        </label>
+
+                        <textarea
+                          id="post-booking-option-reason"
+                          value={optionAddReason}
+                          disabled={optionAddSubmitting}
+                          onChange={(event) =>
+                            setOptionAddReason(
+                              event.target.value,
+                            )
+                          }
+                          rows={3}
+                          placeholder="Ej. El huésped solicita un parking adicional."
+                          className="mt-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {optionAddError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                      {optionAddError}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col-reverse gap-3 border-t border-zinc-200 px-5 py-4 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    disabled={optionAddSubmitting}
+                    onClick={() => {
+                      setOptionDialogOpen(false);
+                      setOptionAddError(null);
+                    }}
+                    className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={
+                      optionAddSubmitting ||
+                      optionCatalogLoading ||
+                      !selectedPostBookingOption ||
+                      postBookingOptions.length === 0
+                    }
+                    onClick={() =>
+                      void handleAddReservationOption()
+                    }
+                    className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {optionAddSubmitting
+                      ? "Agregando..."
+                      : "Agregar complemento"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <section className="rounded-xl border border-zinc-200 bg-white">
             <div className="border-b border-zinc-200 px-5 py-4">
               <h2 className="font-semibold">Pagos</h2>
