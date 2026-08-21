@@ -1,4 +1,8 @@
-﻿import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
+import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
+
+import {
+  resolveReservationOptionActiveQuantity,
+} from "@/lib/booking/reservation-option-quantity";
 
 import { prisma } from "@/lib/prisma";
 
@@ -141,7 +145,9 @@ export async function getReservationOptionInventoryDemand({
       select: {
         id: true,
 
-        quantity: true,
+        includedQuantity: true,
+        optionalQuantity: true,
+        removedOptionalQuantity: true,
 
         startAt: true,
         endAt: true,
@@ -247,11 +253,46 @@ export async function getReservationOptionInventoryDemand({
       continue;
     }
 
+    /*
+     * ReservationOption conserva las
+     * cantidades originales del snapshot.
+     *
+     * El inventario debe considerar solo
+     * aquello que sigue contractualmente
+     * activo después de OPTION_REMOVED.
+     */
+    const activeQuantity =
+      resolveReservationOptionActiveQuantity({
+        includedQuantity:
+          option.includedQuantity,
+
+        optionalQuantity:
+          option.optionalQuantity,
+
+        removedOptionalQuantity:
+          option.removedOptionalQuantity,
+      });
+
     const quantity =
-      Math.max(
-        option.quantity,
-        0,
-      );
+      activeQuantity
+        .activeQuantity;
+
+    /*
+     * Una Option puramente opcional que fue
+     * retirada por completo ya no consume
+     * ningún recurso físico.
+     *
+     * Tampoco propagamos ReservationResource
+     * históricos/stale hacia el inventario:
+     * OPTION_REMOVED será responsable de
+     * eliminar esas asignaciones.
+     */
+    if (
+      quantity ===
+      0
+    ) {
+      continue;
+    }
 
     const requiredQuantity =
       Math.max(

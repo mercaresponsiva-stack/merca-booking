@@ -1,8 +1,12 @@
-﻿import {
+import {
   calculateOptionPrice,
   type OptionPricingBase,
   type OptionPricingFrequency,
 } from "@/lib/booking/option-pricing";
+
+import {
+  resolveReservationOptionActiveQuantity,
+} from "@/lib/booking/reservation-option-quantity";
 
 import {
   resolveHotelOptionBillingUnits,
@@ -13,6 +17,7 @@ export type ExistingHotelReservationOptionForRepricing = {
 
   includedQuantity: number;
   optionalQuantity: number;
+  removedOptionalQuantity: number;
 
   unitPrice:
     | number
@@ -139,13 +144,72 @@ export function repriceHotelReservationOptionsForStay({
             timezone,
           });
 
-        const pricing =
-          calculateOptionPrice({
+        /*
+         * ReservationOption conserva la
+         * cantidad opcional originalmente
+         * contratada.
+         *
+         * Una reprogramación solamente puede
+         * recotizar aquello que sigue activo.
+         */
+        const activeQuantity =
+          resolveReservationOptionActiveQuantity({
             includedQuantity:
               option.includedQuantity,
 
             optionalQuantity:
               option.optionalQuantity,
+
+            removedOptionalQuantity:
+              option.removedOptionalQuantity,
+          });
+
+        /*
+         * Una Option puramente opcional puede
+         * haber sido retirada por completo.
+         *
+         * No llamamos calculateOptionPrice con
+         * cantidad cero porque el Core rechaza
+         * correctamente un Option nuevo sin
+         * cantidad.
+         *
+         * Aquí no estamos creando una Option:
+         * estamos recotizando un snapshot
+         * histórico que ya quedó inactivo.
+         */
+        if (
+          activeQuantity
+            .isFullyRemoved
+        ) {
+          return {
+            id:
+              option.id,
+
+            quantity:
+              0,
+
+            includedQuantity:
+              0,
+
+            optionalQuantity:
+              0,
+
+            billingUnits,
+
+            subtotal:
+              0,
+          };
+        }
+
+        const pricing =
+          calculateOptionPrice({
+            includedQuantity:
+              activeQuantity
+                .includedQuantity,
+
+            optionalQuantity:
+              activeQuantity
+                .activeOptionalQuantity,
 
             unitPrice:
               option.unitPrice,
@@ -163,6 +227,14 @@ export function repriceHotelReservationOptionsForStay({
           id:
             option.id,
 
+          /*
+           * Estas cantidades representan el
+           * estado ACTIVO usado para recotizar.
+           *
+           * El snapshot original persistido
+           * conserva optionalQuantity y
+           * removedOptionalQuantity.
+           */
           quantity:
             pricing.quantity,
 

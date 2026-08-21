@@ -7,6 +7,10 @@ import { calculateReservationFinancialState } from "@/lib/booking/reservation-fi
 import { evaluateAssignedResourcesForInterval } from "@/lib/booking/resource-interval-check";
 
 import {
+  resolveReservationOptionActiveQuantity,
+} from "@/lib/booking/reservation-option-quantity";
+
+import {
   assertProspectiveInventoryAvailable,
   evaluateProspectiveInventory,
   type ProspectiveInventoryDemand,
@@ -169,6 +173,8 @@ export async function PATCH(
                 includedQuantity: true,
 
                 optionalQuantity: true,
+
+                removedOptionalQuantity: true,
 
                 unitPrice: true,
 
@@ -442,7 +448,13 @@ export async function PATCH(
               id:
                 true,
 
-              quantity:
+              includedQuantity:
+                true,
+
+              optionalQuantity:
+                true,
+
+              removedOptionalQuantity:
                 true,
 
               startAt:
@@ -504,11 +516,14 @@ export async function PATCH(
         /*
          * Demanda física de ReservationOptions.
          *
-         * quantity ya representa:
+         * La demanda usa únicamente la
+         * cantidad que sigue activa:
          *
          * includedQuantity
          * +
          * optionalQuantity
+         * -
+         * removedOptionalQuantity
          */
         for (
           const option of
@@ -531,12 +546,27 @@ export async function PATCH(
             );
           }
 
+          const activeOptionQuantity =
+            resolveReservationOptionActiveQuantity({
+              includedQuantity:
+                option.includedQuantity,
+
+              optionalQuantity:
+                option.optionalQuantity,
+
+              removedOptionalQuantity:
+                option.removedOptionalQuantity,
+            });
+
+          /*
+           * Una Option puramente opcional
+           * retirada completamente deja de
+           * generar demanda física futura.
+           */
           if (
-            option.quantity < 1
+            activeOptionQuantity.isFullyRemoved
           ) {
-            throw new Error(
-              "INVALID_RESERVATION_OPTION_QUANTITY",
-            );
+            continue;
           }
 
           for (
@@ -558,7 +588,7 @@ export async function PATCH(
                 newEndAt,
 
               requiredResources:
-                option.quantity *
+                activeOptionQuantity.activeQuantity *
                 Math.max(
                   requirement.requiredQuantity,
                   1,
@@ -674,6 +704,9 @@ export async function PATCH(
 
                 optionalQuantity:
                   option.optionalQuantity,
+
+                removedOptionalQuantity:
+                  option.removedOptionalQuantity,
 
                 unitPrice:
                   option.unitPrice.toString(),
