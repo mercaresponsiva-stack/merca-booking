@@ -346,6 +346,72 @@ type ReservationDetailResponse = {
     }>;
   }>;
 
+  options: Array<{
+    id: string;
+
+    reservationServiceId: string | null;
+
+    optionId: string | null;
+
+    serviceOptionId: string | null;
+
+    name: string;
+
+    description: string | null;
+
+    quantity: number;
+
+    includedQuantity: number;
+
+    optionalQuantity: number;
+
+    unitPrice: number;
+
+    pricingBase:
+      | "RESERVATION"
+      | "QUANTITY"
+      | "PERSON";
+
+    pricingFrequency:
+      | "ONCE"
+      | "PER_NIGHT"
+      | "PER_DAY"
+      | "PER_HOUR";
+
+    billingUnits: number;
+
+    subtotal: number;
+
+    startAt: string | null;
+
+    endAt: string | null;
+
+    resources: Array<{
+      assignmentId: string;
+
+      resourceId: string;
+
+      name: string;
+
+      code: string | null;
+
+      floor: string | null;
+
+      resourceType: {
+        id: string;
+
+        name: string;
+
+        slug: string;
+      } | null;
+
+      createdAt: string;
+    }>;
+
+    createdAt: string;
+
+    updatedAt: string;
+  }>;
   paymentSummary: {
     total: number;
     paid: number;
@@ -2014,6 +2080,145 @@ export default function ReservationDetailPage() {
             </div>
           </section>
 
+          <section className="rounded-xl border border-zinc-200 bg-white">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">Complementos</h2>
+            </div>
+
+            {data.options.length === 0 ? (
+              <p className="p-5 text-sm text-zinc-500">
+                Esta reserva no tiene complementos registrados.
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-100">
+                {data.options.map((option) => (
+                  <div key={option.id} className="p-5">
+                    <div className="flex flex-col justify-between gap-4 sm:flex-row">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold">{option.name}</p>
+
+                          {option.includedQuantity > 0 && (
+                            <span className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-medium">
+                              Incluido
+                            </span>
+                          )}
+
+                          {option.optionalQuantity > 0 && (
+                            <span className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-medium">
+                              Adicional
+                            </span>
+                          )}
+                        </div>
+
+                        {option.description && (
+                          <p className="mt-2 text-sm text-zinc-500">
+                            {option.description}
+                          </p>
+                        )}
+
+                        <div className="mt-3 space-y-1 text-sm text-zinc-600">
+                          <p>
+                            Cantidad total: {option.quantity}
+                          </p>
+
+                          {option.includedQuantity > 0 && (
+                            <p>
+                              Incluida: {option.includedQuantity}
+                            </p>
+                          )}
+
+                          {option.optionalQuantity > 0 && (
+                            <p>
+                              Adicional: {option.optionalQuantity}
+                            </p>
+                          )}
+
+                          {option.optionalQuantity > 0 && (
+                            <p>
+                              Precio adicional unitario:{" "}
+                              {formatMoney(
+                                option.unitPrice,
+                                business.currency,
+                              )}
+                            </p>
+                          )}
+
+                          <p>
+                            Modalidad:{" "}
+                            {option.pricingBase.replaceAll("_", " ")} ·{" "}
+                            {option.pricingFrequency.replaceAll("_", " ")}
+                          </p>
+
+                          <p>
+                            Unidades de cobro: {option.billingUnits}
+                          </p>
+                        </div>
+
+                        {option.startAt && option.endAt && (
+                          <div className="mt-3 text-sm text-zinc-500">
+                            <p>
+                              Desde{" "}
+                              {formatDateTime(
+                                option.startAt,
+                                business.timezone,
+                              )}
+                            </p>
+
+                            <p>
+                              Hasta{" "}
+                              {formatDateTime(
+                                option.endAt,
+                                business.timezone,
+                              )}
+                            </p>
+                          </div>
+                        )}
+
+                        {option.resources.length > 0 && (
+                          <div className="mt-4 rounded-lg bg-zinc-50 p-4">
+                            <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                              Recursos asignados
+                            </p>
+
+                            <div className="mt-3 space-y-2">
+                              {option.resources.map((resource) => (
+                                <div
+                                  key={resource.assignmentId}
+                                  className="flex justify-between gap-4 text-sm"
+                                >
+                                  <span className="font-medium">
+                                    {resource.name}
+                                  </span>
+
+                                  <span className="text-zinc-500">
+                                    {resource.resourceType?.name ?? "Sin tipo"}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="sm:text-right">
+                        <p className="font-medium">
+                          {formatMoney(option.subtotal, business.currency)}
+                        </p>
+
+                        {option.includedQuantity > 0 &&
+                          option.optionalQuantity === 0 && (
+                            <p className="mt-1 text-xs text-zinc-500">
+                              Sin cargo adicional
+                            </p>
+                          )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
           <section className="rounded-xl border border-zinc-200 bg-white">
             <div className="border-b border-zinc-200 px-5 py-4">
               <h2 className="font-semibold">Pagos</h2>

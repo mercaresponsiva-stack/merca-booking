@@ -46,6 +46,24 @@ export async function GET(_request: Request, context: RouteContext) {
           },
         },
 
+        options: {
+          include: {
+            resources: {
+              include: {
+                resource: {
+                  include: {
+                    resourceType: true,
+                  },
+                },
+              },
+            },
+          },
+
+          orderBy: {
+            createdAt: "asc",
+          },
+        },
+
         payments: {
           include: {
             verifiedBy: {
@@ -311,6 +329,96 @@ export async function GET(_request: Request, context: RouteContext) {
 
           createdAt: assignment.createdAt,
         })),
+      })),
+
+      options: reservation.options.map((item) => ({
+        id: item.id,
+
+        reservationServiceId:
+          item.reservationServiceId,
+
+        optionId:
+          item.optionId,
+
+        serviceOptionId:
+          item.serviceOptionId,
+
+        name:
+          item.name,
+
+        description:
+          item.description,
+
+        quantity:
+          item.quantity,
+
+        includedQuantity:
+          item.includedQuantity,
+
+        optionalQuantity:
+          item.optionalQuantity,
+
+        unitPrice:
+          Number(item.unitPrice),
+
+        pricingBase:
+          item.pricingBase,
+
+        pricingFrequency:
+          item.pricingFrequency,
+
+        billingUnits:
+          Number(item.billingUnits),
+
+        subtotal:
+          Number(item.subtotal),
+
+        startAt:
+          item.startAt,
+
+        endAt:
+          item.endAt,
+
+        resources:
+          item.resources.map((assignment) => ({
+            assignmentId:
+              assignment.id,
+
+            resourceId:
+              assignment.resourceId,
+
+            name:
+              assignment.resource.name,
+
+            code:
+              assignment.resource.code,
+
+            floor:
+              assignment.resource.floor,
+
+            resourceType:
+              assignment.resource.resourceType
+                ? {
+                    id:
+                      assignment.resource.resourceType.id,
+
+                    name:
+                      assignment.resource.resourceType.name,
+
+                    slug:
+                      assignment.resource.resourceType.slug,
+                  }
+                : null,
+
+            createdAt:
+              assignment.createdAt,
+          })),
+
+        createdAt:
+          item.createdAt,
+
+        updatedAt:
+          item.updatedAt,
       })),
 
       paymentSummary,
