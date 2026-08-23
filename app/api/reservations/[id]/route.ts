@@ -6,6 +6,10 @@ import {
   resolveReservationOptionActiveQuantity,
 } from "@/lib/booking/reservation-option-quantity";
 
+import {
+  getReservationOptionOperationalGroupKey,
+} from "@/lib/booking/reservation-option-operational-group";
+
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
@@ -346,6 +350,30 @@ export async function GET(_request: Request, context: RouteContext) {
 
         serviceOptionId:
           item.serviceOptionId,
+
+        operationalGroupKey:
+          getReservationOptionOperationalGroupKey({
+            reservationId:
+              reservation.id,
+
+            reservationOptionId:
+              item.id,
+
+            reservationServiceId:
+              item.reservationServiceId,
+
+            serviceOptionId:
+              item.serviceOptionId,
+
+            optionId:
+              item.optionId,
+
+            startAt:
+              item.startAt,
+
+            endAt:
+              item.endAt,
+          }),
 
         name:
           item.name,

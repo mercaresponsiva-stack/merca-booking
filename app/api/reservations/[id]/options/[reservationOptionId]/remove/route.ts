@@ -11,12 +11,16 @@ import {
 } from "@/lib/booking/reservation-financial-state";
 
 import {
-  resolveReservationOptionRemoval,
-} from "@/lib/booking/reservation-option-removal";
+  resolveReservationOptionGroupRemoval,
+} from "@/lib/booking/reservation-option-group-removal";
 
 import {
-  resolveReservationOptionResourceRelease,
-} from "@/lib/booking/reservation-option-resource-release";
+  getReservationOptionOperationalGroupKey,
+} from "@/lib/booking/reservation-option-operational-group";
+
+import {
+  resolveReservationOptionGroupResourceRelease,
+} from "@/lib/booking/reservation-option-group-resource-release";
 
 import {
   resolveReservationPriceDecrease,
@@ -349,15 +353,19 @@ export async function PATCH(
           }
 
           // ─────────────────────────────────────────
-          // 6. RESERVATION OPTION SNAPSHOT
+          // 6. RESERVATION OPTION SNAPSHOTS
+          //
+          // Recuperamos todas las líneas de la
+          // reserva y resolvemos en memoria el
+          // grupo operacional del ID solicitado.
+          //
+          // Las filas siguen siendo independientes:
+          // solamente se agrupan para esta operación.
           // ─────────────────────────────────────────
 
-          const reservationOption =
-            await tx.reservationOption.findFirst({
+          const reservationOptions =
+            await tx.reservationOption.findMany({
               where: {
-                id:
-                  reservationOptionId,
-
                 reservationId:
                   reservation.id,
               },
@@ -417,6 +425,9 @@ export async function PATCH(
                 endAt:
                   true,
 
+                createdAt:
+                  true,
+
                 serviceOption: {
                   select: {
                     resourceTypes: {
@@ -462,13 +473,111 @@ export async function PATCH(
                   ],
                 },
               },
+
+              orderBy: [
+                {
+                  createdAt:
+                    "asc",
+                },
+                {
+                  id:
+                    "asc",
+                },
+              ],
             });
+
+          const reservationOption =
+            reservationOptions.find(
+              (
+                option,
+              ) =>
+                option.id ===
+                reservationOptionId,
+            ) ??
+            null;
 
           if (
             !reservationOption
           ) {
             throw new Error(
               "RESERVATION_OPTION_NOT_FOUND",
+            );
+          }
+
+          const operationalGroupKey =
+            getReservationOptionOperationalGroupKey({
+              reservationId:
+                reservationOption
+                  .reservationId,
+
+              reservationOptionId:
+                reservationOption
+                  .id,
+
+              reservationServiceId:
+                reservationOption
+                  .reservationServiceId,
+
+              serviceOptionId:
+                reservationOption
+                  .serviceOptionId,
+
+              optionId:
+                reservationOption
+                  .optionId,
+
+              startAt:
+                reservationOption
+                  .startAt,
+
+              endAt:
+                reservationOption
+                  .endAt,
+            });
+
+          const groupReservationOptions =
+            reservationOptions.filter(
+              (
+                option,
+              ) =>
+                getReservationOptionOperationalGroupKey({
+                  reservationId:
+                    option
+                      .reservationId,
+
+                  reservationOptionId:
+                    option.id,
+
+                  reservationServiceId:
+                    option
+                      .reservationServiceId,
+
+                  serviceOptionId:
+                    option
+                      .serviceOptionId,
+
+                  optionId:
+                    option
+                      .optionId,
+
+                  startAt:
+                    option
+                      .startAt,
+
+                  endAt:
+                    option
+                      .endAt,
+                }) ===
+                operationalGroupKey,
+            );
+
+          if (
+            groupReservationOptions
+              .length ===
+            0
+          ) {
+            throw new Error(
+              "RESERVATION_OPTION_GROUP_MEMBERS_REQUIRED",
             );
           }
 
@@ -494,169 +603,237 @@ export async function PATCH(
             });
 
           // ─────────────────────────────────────────
-          // 8. OPTION REMOVAL
+          // 8. OPERATIONAL GROUP REMOVAL
+          //
+          // La cantidad solicitada se distribuye
+          // desde las compras más recientes hacia
+          // las más antiguas.
           // ─────────────────────────────────────────
 
           const removal =
-            resolveReservationOptionRemoval({
-              includedQuantity:
-                reservationOption
-                  .includedQuantity,
+            resolveReservationOptionGroupRemoval({
+              members:
+                groupReservationOptions.map(
+                  (
+                    option,
+                  ) => ({
+                    reservationOptionId:
+                      option.id,
 
-              optionalQuantity:
-                reservationOption
-                  .optionalQuantity,
+                    createdAt:
+                      option
+                        .createdAt,
 
-              removedOptionalQuantity:
-                reservationOption
-                  .removedOptionalQuantity,
+                    includedQuantity:
+                      option
+                        .includedQuantity,
+
+                    optionalQuantity:
+                      option
+                        .optionalQuantity,
+
+                    removedOptionalQuantity:
+                      option
+                        .removedOptionalQuantity,
+
+                    unitPrice:
+                      option
+                        .unitPrice
+                        .toString(),
+
+                    pricingBase:
+                      option
+                        .pricingBase,
+
+                    pricingFrequency:
+                      option
+                        .pricingFrequency,
+
+                    billingUnits:
+                      Number(
+                        option
+                          .billingUnits,
+                      ),
+
+                    currentSubtotal:
+                      Number(
+                        option
+                          .subtotal,
+                      ),
+                  }),
+                ),
 
               removeOptionalQuantity,
-
-              unitPrice:
-                reservationOption
-                  .unitPrice
-                  .toString(),
-
-              pricingBase:
-                reservationOption
-                  .pricingBase,
-
-              pricingFrequency:
-                reservationOption
-                  .pricingFrequency,
-
-              billingUnits:
-                Number(
-                  reservationOption
-                    .billingUnits,
-                ),
-
-              currentSubtotal:
-                Number(
-                  reservationOption
-                    .subtotal,
-                ),
             });
 
-          // ─────────────────────────────────────────
-          // ─────────────────────────────────────────
-          // 9. PHYSICAL RESOURCE RELEASE
-          //
-          // OPTION_REMOVED solo REDUCE demanda.
-          //
-          // Nunca asignamos recursos nuevos aquí.
-          // Solamente determinamos qué assignments
-          // existentes ya sobran.
-          // ─────────────────────────────────────────
+          const groupOptionsById =
+            new Map(
+              groupReservationOptions.map(
+                (
+                  option,
+                ) => [
+                  option.id,
+                  option,
+                ] as const,
+              ),
+            );
 
-          const hasAssignedResources =
-            reservationOption
-              .resources
-              .length >
-            0;
-
-          /*
-           * Si todavía queda cantidad activa y
-           * existen assignments físicos, necesitamos
-           * conocer los requisitos vigentes para
-           * decidir qué conservar.
-           *
-           * ReservationOption todavía no snapshottea
-           * los ResourceType requirements históricos,
-           * por lo que no inventamos esa información
-           * si ServiceOption ya no existe.
-           *
-           * Si activeQuantityAfter = 0 podemos liberar
-           * todo de forma segura aun sin configuración.
-           */
-          if (
+          const affectedReservationOptions =
             removal
-              .activeQuantityAfter >
-              0 &&
-            hasAssignedResources &&
-            !reservationOption
-              .serviceOption
+              .affectedMembers
+              .map(
+                (
+                  affectedMember,
+                ) => {
+                  const option =
+                    groupOptionsById.get(
+                      affectedMember
+                        .reservationOptionId,
+                    );
+
+                  if (
+                    !option
+                  ) {
+                    throw new Error(
+                      "RESERVATION_OPTION_GROUP_MEMBER_NOT_FOUND",
+                    );
+                  }
+
+                  return {
+                    reservationOption:
+                      option,
+
+                    removal:
+                      affectedMember
+                        .removal,
+                  };
+                },
+              );
+
+          const primaryAffectedReservationOption =
+            affectedReservationOptions[0];
+
+          if (
+            !primaryAffectedReservationOption
           ) {
             throw new Error(
-              "OPTION_REMOVE_RESOURCE_CONFIGURATION_UNAVAILABLE",
+              "RESERVATION_OPTION_GROUP_REMOVAL_NOT_FULLY_ALLOCATED",
             );
           }
 
-          const resourceRequirements =
-            removal
-              .activeQuantityAfter ===
-              0
-              ? []
-              : reservationOption
-                  .serviceOption
-                  ?.resourceTypes
-                  .map(
-                    (
-                      requirement,
-                    ) => ({
-                      resourceTypeId:
-                        requirement
-                          .resourceTypeId,
-
-                      requiredQuantity:
-                        requirement
-                          .requiredQuantity,
-                    }),
-                  ) ??
-                [];
+          // ─────────────────────────────────────────
+          // 9. PHYSICAL RESOURCE RELEASE
+          //
+          // Solo evaluamos las líneas afectadas.
+          // Una línea no afectada conserva todas
+          // sus asignaciones intactas.
+          // ─────────────────────────────────────────
 
           const resourceRelease =
-            resolveReservationOptionResourceRelease({
-              activeQuantityAfter:
-                removal
-                  .activeQuantityAfter,
+            resolveReservationOptionGroupResourceRelease({
+              members:
+                affectedReservationOptions.map(
+                  ({
+                    reservationOption:
+                      affectedOption,
 
-              requirements:
-                resourceRequirements,
+                    removal:
+                      affectedRemoval,
+                  }) => {
+                    const hasAssignedResources =
+                      affectedOption
+                        .resources
+                        .length >
+                      0;
 
-              assignments:
-                reservationOption
-                  .resources
-                  .map(
-                    (
-                      assignment,
-                    ) => {
-                      const resourceTypeId =
-                        assignment
-                          .resource
-                          .resourceTypeId;
+                    if (
+                      affectedRemoval
+                        .activeQuantityAfter >
+                        0 &&
+                      hasAssignedResources &&
+                      !affectedOption
+                        .serviceOption
+                    ) {
+                      throw new Error(
+                        "OPTION_REMOVE_RESOURCE_CONFIGURATION_UNAVAILABLE",
+                      );
+                    }
 
-                      /*
-                       * No podemos decidir qué
-                       * assignment conservar o
-                       * liberar si el Resource
-                       * físico no declara su tipo.
-                       */
-                      if (
-                        !resourceTypeId
-                      ) {
-                        throw new Error(
-                          "OPTION_REMOVE_ASSIGNED_RESOURCE_TYPE_REQUIRED",
+                    const resourceRequirements =
+                      affectedRemoval
+                        .activeQuantityAfter ===
+                        0
+                        ? []
+                        : affectedOption
+                            .serviceOption
+                            ?.resourceTypes
+                            .map(
+                              (
+                                requirement,
+                              ) => ({
+                                resourceTypeId:
+                                  requirement
+                                    .resourceTypeId,
+
+                                requiredQuantity:
+                                  requirement
+                                    .requiredQuantity,
+                              }),
+                            ) ??
+                          [];
+
+                    const assignments =
+                      affectedOption
+                        .resources
+                        .map(
+                          (
+                            assignment,
+                          ) => {
+                            const resourceTypeId =
+                              assignment
+                                .resource
+                                .resourceTypeId;
+
+                            if (
+                              !resourceTypeId
+                            ) {
+                              throw new Error(
+                                "OPTION_REMOVE_ASSIGNED_RESOURCE_TYPE_REQUIRED",
+                              );
+                            }
+
+                            return {
+                              assignmentId:
+                                assignment.id,
+
+                              resourceId:
+                                assignment
+                                  .resourceId,
+
+                              resourceTypeId,
+
+                              createdAt:
+                                assignment
+                                  .createdAt,
+                            };
+                          },
                         );
-                      }
 
-                      return {
-                        assignmentId:
-                          assignment.id,
+                    return {
+                      reservationOptionId:
+                        affectedOption.id,
 
-                        resourceId:
-                          assignment
-                            .resourceId,
+                      activeQuantityAfter:
+                        affectedRemoval
+                          .activeQuantityAfter,
 
-                        resourceTypeId,
+                      requirements:
+                        resourceRequirements,
 
-                        createdAt:
-                          assignment
-                            .createdAt,
-                      };
-                    },
-                  ),
+                      assignments,
+                    };
+                  },
+                ),
             });
 
           // ─────────────────────────────────────────
@@ -759,8 +936,22 @@ export async function PATCH(
                   action:
                     "OPTION_REMOVED",
 
-                  reservationOptionId:
+                  operationalGroupKey,
+
+                  representativeReservationOptionId:
                     reservationOption.id,
+
+                  reservationOptionIds:
+                    groupReservationOptions.map(
+                      (
+                        option,
+                      ) =>
+                        option.id,
+                    ),
+
+                  affectedReservationOptionIds:
+                    removal
+                      .affectedReservationOptionIds,
 
                   reservationServiceId:
                     reservationOption
@@ -777,9 +968,18 @@ export async function PATCH(
                   name:
                     reservationOption.name,
 
+                  groupMemberCount:
+                    groupReservationOptions
+                      .length,
+
+                  affectedMemberCount:
+                    removal
+                      .affectedMembers
+                      .length,
+
                   originalQuantity:
-                    reservationOption
-                      .quantity,
+                    removal
+                      .originalQuantity,
 
                   includedQuantity:
                     removal
@@ -817,22 +1017,6 @@ export async function PATCH(
                     removal
                       .activeQuantityAfter,
 
-                  unitPrice:
-                    removal
-                      .unitPrice,
-
-                  pricingBase:
-                    removal
-                      .pricingBase,
-
-                  pricingFrequency:
-                    removal
-                      .pricingFrequency,
-
-                  billingUnits:
-                    removal
-                      .billingUnits,
-
                   oldOptionSubtotal:
                     removal
                       .oldSubtotal,
@@ -853,7 +1037,102 @@ export async function PATCH(
                     financialImpact
                       .overpayment,
 
+                  memberRemovals:
+                    affectedReservationOptions.map(
+                      ({
+                        reservationOption:
+                          affectedOption,
+
+                        removal:
+                          affectedRemoval,
+                      }) => ({
+                        reservationOptionId:
+                          affectedOption.id,
+
+                        createdAt:
+                          affectedOption
+                            .createdAt
+                            .toISOString(),
+
+                        originalQuantity:
+                          affectedOption
+                            .quantity,
+
+                        includedQuantity:
+                          affectedRemoval
+                            .includedQuantity,
+
+                        originalOptionalQuantity:
+                          affectedRemoval
+                            .originalOptionalQuantity,
+
+                        removedOptionalQuantityBefore:
+                          affectedRemoval
+                            .removedOptionalQuantityBefore,
+
+                        removeOptionalQuantity:
+                          affectedRemoval
+                            .removeOptionalQuantity,
+
+                        removedOptionalQuantityAfter:
+                          affectedRemoval
+                            .removedOptionalQuantityAfter,
+
+                        activeOptionalQuantityBefore:
+                          affectedRemoval
+                            .activeOptionalQuantityBefore,
+
+                        activeOptionalQuantityAfter:
+                          affectedRemoval
+                            .activeOptionalQuantityAfter,
+
+                        activeQuantityBefore:
+                          affectedRemoval
+                            .activeQuantityBefore,
+
+                        activeQuantityAfter:
+                          affectedRemoval
+                            .activeQuantityAfter,
+
+                        unitPrice:
+                          affectedRemoval
+                            .unitPrice,
+
+                        pricingBase:
+                          affectedRemoval
+                            .pricingBase,
+
+                        pricingFrequency:
+                          affectedRemoval
+                            .pricingFrequency,
+
+                        billingUnits:
+                          affectedRemoval
+                            .billingUnits,
+
+                        oldSubtotal:
+                          affectedRemoval
+                            .oldSubtotal,
+
+                        newSubtotal:
+                          affectedRemoval
+                            .newSubtotal,
+
+                        priceReduction:
+                          affectedRemoval
+                            .priceReduction,
+
+                        isFullyRemovedAfter:
+                          affectedRemoval
+                            .isFullyRemovedAfter,
+                      }),
+                    ),
+
                   resources: {
+                    affectedMembers:
+                      resourceRelease
+                        .affectedMembers,
+
                     requiredResourcesAfter:
                       resourceRelease
                         .requiredResourcesAfter,
@@ -881,6 +1160,10 @@ export async function PATCH(
                     resourceTypes:
                       resourceRelease
                         .resourceTypes,
+
+                    members:
+                      resourceRelease
+                        .members,
                   },
 
                   requestedAt:
@@ -891,83 +1174,111 @@ export async function PATCH(
             });
 
           // ─────────────────────────────────────────
-          // 12. UPDATE RESERVATION OPTION
+          // 12. UPDATE RESERVATION OPTIONS
           //
           // quantity y optionalQuantity originales
-          // permanecen INTACTOS.
+          // permanecen intactos en cada snapshot.
           // ─────────────────────────────────────────
+
+          const updatedOptions =
+            [];
+
+          for (
+            const affected of
+            affectedReservationOptions
+          ) {
+            const updatedOption =
+              await tx.reservationOption.update({
+                where: {
+                  id:
+                    affected
+                      .reservationOption
+                      .id,
+                },
+
+                data: {
+                  removedOptionalQuantity:
+                    affected
+                      .removal
+                      .removedOptionalQuantityAfter,
+
+                  subtotal:
+                    affected
+                      .removal
+                      .newSubtotal,
+                },
+
+                select: {
+                  id:
+                    true,
+
+                  name:
+                    true,
+
+                  quantity:
+                    true,
+
+                  includedQuantity:
+                    true,
+
+                  optionalQuantity:
+                    true,
+
+                  removedOptionalQuantity:
+                    true,
+
+                  unitPrice:
+                    true,
+
+                  pricingBase:
+                    true,
+
+                  pricingFrequency:
+                    true,
+
+                  billingUnits:
+                    true,
+
+                  subtotal:
+                    true,
+
+                  startAt:
+                    true,
+
+                  endAt:
+                    true,
+
+                  updatedAt:
+                    true,
+                },
+              });
+
+            updatedOptions.push(
+              updatedOption,
+            );
+          }
 
           const updatedOption =
-            await tx.reservationOption.update({
-              where: {
-                id:
-                  reservationOption.id,
-              },
+            updatedOptions[0];
 
-              data: {
-                removedOptionalQuantity:
-                  removal
-                    .removedOptionalQuantityAfter,
+          if (
+            !updatedOption
+          ) {
+            throw new Error(
+              "RESERVATION_OPTION_GROUP_UPDATE_REQUIRED",
+            );
+          }
 
-                subtotal:
-                  removal
-                    .newSubtotal,
-              },
+          const primaryRemoval =
+            primaryAffectedReservationOption
+              .removal;
 
-              select: {
-                id:
-                  true,
-
-                name:
-                  true,
-
-                quantity:
-                  true,
-
-                includedQuantity:
-                  true,
-
-                optionalQuantity:
-                  true,
-
-                removedOptionalQuantity:
-                  true,
-
-                unitPrice:
-                  true,
-
-                pricingBase:
-                  true,
-
-                pricingFrequency:
-                  true,
-
-                billingUnits:
-                  true,
-
-                subtotal:
-                  true,
-
-                startAt:
-                  true,
-
-                endAt:
-                  true,
-
-                updatedAt:
-                  true,
-              },
-            });
-
-          // ─────────────────────────────────────────
           // ─────────────────────────────────────────
           // 13. RELEASE PHYSICAL ASSIGNMENTS
           //
-          // Solo eliminamos ReservationResource
-          // pertenecientes a ESTA ReservationOption.
-          //
-          // No tocamos recursos del Service ni
-          // de otros complementos.
+          // Solo eliminamos los IDs decididos por
+          // los helpers y pertenecientes a alguna
+          // de las líneas afectadas.
           // ─────────────────────────────────────────
 
           const releasedAssignmentIds =
@@ -996,8 +1307,11 @@ export async function PATCH(
                 reservationId:
                   reservation.id,
 
-                reservationOptionId:
-                  reservationOption.id,
+                reservationOptionId: {
+                  in:
+                    removal
+                      .affectedReservationOptionIds,
+                },
               },
             });
           }
@@ -1183,7 +1497,24 @@ export async function PATCH(
             option:
               updatedOption,
 
-            removal,
+            options:
+              updatedOptions,
+
+            removal:
+              primaryRemoval,
+
+            groupRemoval:
+              removal,
+
+            operationalGroupKey,
+
+            reservationOptionIds:
+              groupReservationOptions.map(
+                (
+                  option,
+                ) =>
+                  option.id,
+              ),
 
             resourceRelease,
 
@@ -1370,6 +1701,113 @@ export async function PATCH(
           result
             .removal
             .priceReduction,
+      },
+
+      optionGroup: {
+        operationalGroupKey:
+          result
+            .operationalGroupKey,
+
+        reservationOptionIds:
+          result
+            .reservationOptionIds,
+
+        affectedReservationOptionIds:
+          result
+            .groupRemoval
+            .affectedReservationOptionIds,
+
+        removeOptionalQuantity:
+          result
+            .groupRemoval
+            .removeOptionalQuantity,
+
+        originalQuantity:
+          result
+            .groupRemoval
+            .originalQuantity,
+
+        includedQuantity:
+          result
+            .groupRemoval
+            .includedQuantity,
+
+        originalOptionalQuantity:
+          result
+            .groupRemoval
+            .originalOptionalQuantity,
+
+        removedOptionalQuantityBefore:
+          result
+            .groupRemoval
+            .removedOptionalQuantityBefore,
+
+        removedOptionalQuantityAfter:
+          result
+            .groupRemoval
+            .removedOptionalQuantityAfter,
+
+        activeOptionalQuantityBefore:
+          result
+            .groupRemoval
+            .activeOptionalQuantityBefore,
+
+        activeOptionalQuantityAfter:
+          result
+            .groupRemoval
+            .activeOptionalQuantityAfter,
+
+        activeQuantityBefore:
+          result
+            .groupRemoval
+            .activeQuantityBefore,
+
+        activeQuantityAfter:
+          result
+            .groupRemoval
+            .activeQuantityAfter,
+
+        oldSubtotal:
+          result
+            .groupRemoval
+            .oldSubtotal,
+
+        newSubtotal:
+          result
+            .groupRemoval
+            .newSubtotal,
+
+        priceReduction:
+          result
+            .groupRemoval
+            .priceReduction,
+
+        isFullyRemovedAfter:
+          result
+            .groupRemoval
+            .isFullyRemovedAfter,
+
+        members:
+          result
+            .groupRemoval
+            .affectedMembers
+            .map(
+              (
+                member,
+              ) => ({
+                reservationOptionId:
+                  member
+                    .reservationOptionId,
+
+                createdAt:
+                  member
+                    .createdAt,
+
+                removal:
+                  member
+                    .removal,
+              }),
+            ),
       },
 
       change: {

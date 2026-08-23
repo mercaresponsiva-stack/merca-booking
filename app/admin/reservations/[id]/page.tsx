@@ -473,6 +473,8 @@ type ReservationDetailResponse = {
 
     serviceOptionId: string | null;
 
+    operationalGroupKey: string;
+
     name: string;
 
     description: string | null;
@@ -727,6 +729,359 @@ type PaymentTargetStatus = "PAID" | "FAILED";
 
 import { DEV_RECEPTION_USER_ID as TEMP_RECEPTION_USER_ID } from "@/lib/config/dev-context";
 
+type ReservationDetailOption =
+  ReservationDetailResponse[
+    "options"
+  ][number];
+
+type ReservationDetailOptionGroup =
+  ReservationDetailOption & {
+    /*
+     * ID estable utilizado como representante
+     * del grupo frente al endpoint.
+     */
+    reservationOptionIds:
+      string[];
+
+    memberCount: number;
+
+    /*
+     * Si los snapshots de precio difieren,
+     * mostramos únicamente el subtotal
+     * acumulado y no un unitPrice engañoso.
+     */
+    hasMixedPricing:
+      boolean;
+  };
+
+function getReservationOptionGroups(
+  options:
+    ReservationDetailOption[],
+): ReservationDetailOptionGroup[] {
+  const optionsByGroup =
+    new Map<
+      string,
+      ReservationDetailOption[]
+    >();
+
+  for (
+    const option of options
+  ) {
+    const current =
+      optionsByGroup.get(
+        option
+          .operationalGroupKey,
+      ) ?? [];
+
+    current.push(
+      option,
+    );
+
+    optionsByGroup.set(
+      option
+        .operationalGroupKey,
+
+      current,
+    );
+  }
+
+  const groups:
+    ReservationDetailOptionGroup[] =
+    [];
+
+  for (
+    const members of
+    optionsByGroup.values()
+  ) {
+    const sortedMembers = [
+      ...members,
+    ].sort(
+      (
+        first,
+        second,
+      ) => {
+        const createdAtComparison =
+          first
+            .createdAt
+            .localeCompare(
+              second
+                .createdAt,
+            );
+
+        if (
+          createdAtComparison !==
+          0
+        ) {
+          return createdAtComparison;
+        }
+
+        return first.id.localeCompare(
+          second.id,
+        );
+      },
+    );
+
+    const firstMember =
+      sortedMembers[0];
+
+    if (
+      !firstMember
+    ) {
+      continue;
+    }
+
+    const quantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option.quantity,
+
+        0,
+      );
+
+    const includedQuantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option
+            .includedQuantity,
+
+        0,
+      );
+
+    const optionalQuantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option
+            .optionalQuantity,
+
+        0,
+      );
+
+    const removedOptionalQuantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option
+            .removedOptionalQuantity,
+
+        0,
+      );
+
+    const activeOptionalQuantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option
+            .activeOptionalQuantity,
+
+        0,
+      );
+
+    const activeQuantity =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          option
+            .activeQuantity,
+
+        0,
+      );
+
+    /*
+     * Sumamos dinero en centavos para no
+     * introducir errores binarios visibles.
+     */
+    const subtotalCents =
+      sortedMembers.reduce(
+        (
+          total,
+          option,
+        ) =>
+          total +
+          Math.round(
+            option.subtotal *
+              100,
+          ),
+
+        0,
+      );
+
+    const pricingSignatures =
+      new Set(
+        sortedMembers.map(
+          (
+            option,
+          ) =>
+            JSON.stringify([
+              Math.round(
+                option.unitPrice *
+                  100,
+              ),
+
+              option
+                .pricingBase,
+
+              option
+                .pricingFrequency,
+
+              Math.round(
+                option.billingUnits *
+                  100,
+              ),
+            ]),
+        ),
+      );
+
+    const resourcesById =
+      new Map<
+        string,
+        ReservationDetailOption[
+          "resources"
+        ][number]
+      >();
+
+    for (
+      const option of
+      sortedMembers
+    ) {
+      for (
+        const resource of
+        option.resources
+      ) {
+        if (
+          !resourcesById.has(
+            resource.resourceId,
+          )
+        ) {
+          resourcesById.set(
+            resource.resourceId,
+            resource,
+          );
+        }
+      }
+    }
+
+    const resources = [
+      ...resourcesById.values(),
+    ].sort(
+      (
+        first,
+        second,
+      ) => {
+        const createdAtComparison =
+          first
+            .createdAt
+            .localeCompare(
+              second
+                .createdAt,
+            );
+
+        if (
+          createdAtComparison !==
+          0
+        ) {
+          return createdAtComparison;
+        }
+
+        return first
+          .assignmentId
+          .localeCompare(
+            second
+              .assignmentId,
+          );
+      },
+    );
+
+    const updatedAt =
+      sortedMembers.reduce(
+        (
+          latest,
+          option,
+        ) =>
+          option.updatedAt >
+          latest
+            ? option.updatedAt
+            : latest,
+
+        firstMember
+          .updatedAt,
+      );
+
+    groups.push({
+      ...firstMember,
+
+      /*
+       * El miembro más antiguo es un
+       * representante estable. El endpoint
+       * resolverá el grupo completo.
+       */
+      id:
+        firstMember.id,
+
+      reservationOptionIds:
+        sortedMembers.map(
+          (
+            option,
+          ) =>
+            option.id,
+        ),
+
+      memberCount:
+        sortedMembers.length,
+
+      quantity,
+
+      includedQuantity,
+
+      optionalQuantity,
+
+      removedOptionalQuantity,
+
+      activeOptionalQuantity,
+
+      activeQuantity,
+
+      isFullyRemoved:
+        activeQuantity ===
+        0,
+
+      subtotal:
+        subtotalCents /
+        100,
+
+      resources,
+
+      hasMixedPricing:
+        pricingSignatures.size >
+        1,
+
+      updatedAt,
+    });
+  }
+
+  return groups;
+}
+
 type ResourceAvailability =
   | "AVAILABLE"
   | "ASSIGNED"
@@ -734,8 +1089,21 @@ type ResourceAvailability =
   | "BLOCKED"
   | "UNAVAILABLE";
 
-type ResourceRequirement = {
-  reservationServiceId: string;
+type ReservationResourceCandidate = {
+  id: string;
+  name: string;
+  code: string | null;
+  floor: number | null;
+  capacity: number;
+  resourceTypeId: string | null;
+  assignmentId: string | null;
+  assignedToReservation: boolean;
+  available: boolean;
+  availability: ResourceAvailability;
+  unavailableReason: string | null;
+};
+
+type ResourceRequirementBase = {
   serviceId: string;
 
   service: {
@@ -755,20 +1123,75 @@ type ResourceRequirement = {
   remainingQuantity: number;
   satisfied: boolean;
 
-  resources: Array<{
+  resources:
+    ReservationResourceCandidate[];
+};
+
+type ServiceResourceRequirement =
+  ResourceRequirementBase & {
+    source: "SERVICE";
+
+    reservationServiceId: string;
+  };
+
+type OptionResourceRequirementShared = {
+  source: "OPTION";
+
+  reservationServiceId:
+    string | null;
+
+  operationalGroupKey: string;
+
+  requirementGroupKey: string;
+
+  option: {
     id: string;
     name: string;
-    code: string | null;
-    floor: number | null;
-    capacity: number;
-    resourceTypeId: string | null;
-    assignmentId: string | null;
-    assignedToReservation: boolean;
-    available: boolean;
-    availability: ResourceAvailability;
-    unavailableReason: string | null;
-  }>;
+    description: string | null;
+  };
+
+  activeQuantity: number;
+
+  requiredQuantityPerUnit:
+    number;
+
+  effectiveStartAt: string;
+  effectiveEndAt: string;
+
+  usesReservationInterval:
+    boolean;
 };
+
+type RawOptionResourceRequirement =
+  ResourceRequirementBase &
+    OptionResourceRequirementShared & {
+      reservationOptionId:
+        string;
+
+      createdAt: string;
+    };
+
+type OptionResourceRequirement =
+  ResourceRequirementBase &
+    OptionResourceRequirementShared & {
+      reservationOptionIds:
+        string[];
+
+      /*
+       * Línea histórica concreta que todavía
+       * necesita recibir el siguiente recurso.
+       *
+       * Aunque la UI agrupe varias compras,
+       * ReservationResource conserva siempre
+       * un propietario ReservationOption real.
+       */
+      assignmentTargetReservationOptionId:
+        string | null;
+    };
+
+type ResourceRequirement =
+  | ServiceResourceRequirement
+  | OptionResourceRequirement;
 
 type ReservationResourcesResponse = {
   success: true;
@@ -781,7 +1204,11 @@ type ReservationResourcesResponse = {
     endAt: string;
   };
 
-  requirements: ResourceRequirement[];
+  requirements:
+    ServiceResourceRequirement[];
+
+  optionRequirements:
+    RawOptionResourceRequirement[];
 };
 
 type ReservationOperationalStatus =
@@ -916,6 +1343,430 @@ function getResourceAvailabilityLabel(availability: ResourceAvailability) {
     case "UNAVAILABLE":
       return "No disponible";
   }
+}
+
+function compareRawOptionResourceRequirements(
+  first:
+    RawOptionResourceRequirement,
+
+  second:
+    RawOptionResourceRequirement,
+) {
+  const createdAtComparison =
+    first.createdAt.localeCompare(
+      second.createdAt,
+    );
+
+  if (
+    createdAtComparison !==
+    0
+  ) {
+    return createdAtComparison;
+  }
+
+  return first
+    .reservationOptionId
+    .localeCompare(
+      second
+        .reservationOptionId,
+    );
+}
+
+function mergeOptionResourceCandidates(
+  requirements:
+    RawOptionResourceRequirement[],
+) {
+  const candidatesByResourceId =
+    new Map<
+      string,
+      ReservationResourceCandidate[]
+    >();
+
+  for (
+    const requirement of
+    requirements
+  ) {
+    for (
+      const resource of
+      requirement.resources
+    ) {
+      const current =
+        candidatesByResourceId.get(
+          resource.id,
+        ) ?? [];
+
+      current.push(
+        resource,
+      );
+
+      candidatesByResourceId.set(
+        resource.id,
+        current,
+      );
+    }
+  }
+
+  const mergedResources:
+    ReservationResourceCandidate[] =
+    [];
+
+  for (
+    const candidates of
+    candidatesByResourceId.values()
+  ) {
+    /*
+     * Si el Resource pertenece a cualquiera
+     * de las líneas del grupo, en la vista
+     * agrupada aparece una sola vez como
+     * asignado.
+     */
+    const assignedCandidate =
+      candidates.find(
+        (candidate) =>
+          candidate
+            .assignedToReservation,
+      );
+
+    if (
+      assignedCandidate
+    ) {
+      mergedResources.push({
+        ...assignedCandidate,
+
+        assignedToReservation:
+          true,
+
+        available:
+          false,
+
+        availability:
+          "ASSIGNED",
+
+        unavailableReason:
+          null,
+      });
+
+      continue;
+    }
+
+    /*
+     * Basta que una evaluación válida del
+     * mismo grupo lo considere disponible.
+     */
+    const availableCandidate =
+      candidates.find(
+        (candidate) =>
+          candidate.available,
+      );
+
+    if (
+      availableCandidate
+    ) {
+      mergedResources.push({
+        ...availableCandidate,
+
+        assignmentId:
+          null,
+
+        assignedToReservation:
+          false,
+
+        available:
+          true,
+
+        availability:
+          "AVAILABLE",
+
+        unavailableReason:
+          null,
+      });
+
+      continue;
+    }
+
+    const unavailableCandidate =
+      candidates.find(
+        (candidate) =>
+          candidate.availability ===
+          "OCCUPIED",
+      ) ??
+      candidates.find(
+        (candidate) =>
+          candidate.availability ===
+          "BLOCKED",
+      ) ??
+      candidates.find(
+        (candidate) =>
+          candidate.availability ===
+          "UNAVAILABLE",
+      ) ??
+      candidates[0];
+
+    if (
+      !unavailableCandidate
+    ) {
+      continue;
+    }
+
+    mergedResources.push({
+      ...unavailableCandidate,
+
+      assignmentId:
+        null,
+
+      assignedToReservation:
+        false,
+
+      available:
+        false,
+
+      availability:
+        unavailableCandidate
+          .availability ===
+        "ASSIGNED"
+          ? "UNAVAILABLE"
+          : unavailableCandidate
+              .availability,
+    });
+  }
+
+  return mergedResources;
+}
+
+function aggregateOptionResourceRequirements(
+  requirements:
+    RawOptionResourceRequirement[],
+): OptionResourceRequirement[] {
+  const requirementsByGroup =
+    new Map<
+      string,
+      RawOptionResourceRequirement[]
+    >();
+
+  for (
+    const requirement of
+    requirements
+  ) {
+    const current =
+      requirementsByGroup.get(
+        requirement
+          .requirementGroupKey,
+      ) ?? [];
+
+    current.push(
+      requirement,
+    );
+
+    requirementsByGroup.set(
+      requirement
+        .requirementGroupKey,
+
+      current,
+    );
+  }
+
+  const groupedRequirements:
+    OptionResourceRequirement[] =
+    [];
+
+  for (
+    const groupRequirements of
+    requirementsByGroup.values()
+  ) {
+    const sortedRequirements = [
+      ...groupRequirements,
+    ].sort(
+      compareRawOptionResourceRequirements,
+    );
+
+    const firstRequirement =
+      sortedRequirements[0];
+
+    if (
+      !firstRequirement
+    ) {
+      continue;
+    }
+
+    const activeQuantity =
+      sortedRequirements.reduce(
+        (
+          total,
+          requirement,
+        ) =>
+          total +
+          requirement
+            .activeQuantity,
+
+        0,
+      );
+
+    const requiredQuantity =
+      sortedRequirements.reduce(
+        (
+          total,
+          requirement,
+        ) =>
+          total +
+          requirement
+            .requiredQuantity,
+
+        0,
+      );
+
+    const assignedQuantity =
+      sortedRequirements.reduce(
+        (
+          total,
+          requirement,
+        ) =>
+          total +
+          requirement
+            .assignedQuantity,
+
+        0,
+      );
+
+    const remainingQuantity =
+      Math.max(
+        requiredQuantity -
+          assignedQuantity,
+
+        0,
+      );
+
+    const satisfied =
+      remainingQuantity ===
+      0;
+
+    /*
+     * Las líneas más antiguas se completan
+     * primero. Cuando aumenta la cantidad
+     * del mismo complemento, la primera
+     * línea todavía incompleta vuelve a
+     * habilitar la asignación.
+     */
+    const assignmentTarget =
+      satisfied
+        ? null
+        : sortedRequirements.find(
+            (requirement) =>
+              requirement
+                .remainingQuantity >
+              0,
+          ) ??
+          null;
+
+    groupedRequirements.push({
+      source:
+        "OPTION",
+
+      reservationServiceId:
+        firstRequirement
+          .reservationServiceId,
+
+      operationalGroupKey:
+        firstRequirement
+          .operationalGroupKey,
+
+      requirementGroupKey:
+        firstRequirement
+          .requirementGroupKey,
+
+      reservationOptionIds:
+        sortedRequirements.map(
+          (requirement) =>
+            requirement
+              .reservationOptionId,
+        ),
+
+      assignmentTargetReservationOptionId:
+        assignmentTarget
+          ?.reservationOptionId ??
+        null,
+
+      serviceId:
+        firstRequirement
+          .serviceId,
+
+      service:
+        firstRequirement
+          .service,
+
+      resourceType:
+        firstRequirement
+          .resourceType,
+
+      option:
+        firstRequirement
+          .option,
+
+      activeQuantity,
+
+      requiredQuantityPerUnit:
+        firstRequirement
+          .requiredQuantityPerUnit,
+
+      effectiveStartAt:
+        firstRequirement
+          .effectiveStartAt,
+
+      effectiveEndAt:
+        firstRequirement
+          .effectiveEndAt,
+
+      usesReservationInterval:
+        firstRequirement
+          .usesReservationInterval,
+
+      requiredQuantity,
+
+      assignedQuantity,
+
+      remainingQuantity,
+
+      satisfied,
+
+      resources:
+        mergeOptionResourceCandidates(
+          sortedRequirements,
+        ),
+    });
+  }
+
+  return groupedRequirements;
+}
+
+function getResourceRequirementKey(
+  requirement:
+    ResourceRequirement,
+) {
+  if (
+    requirement.source ===
+    "OPTION"
+  ) {
+    return (
+      "OPTION:" +
+      requirement
+        .requirementGroupKey
+    );
+  }
+
+  return `SERVICE:${requirement.reservationServiceId}:${requirement.resourceType.id}`;
+}
+
+function getReservationResourceRequirements(
+  response:
+    ReservationResourcesResponse,
+): ResourceRequirement[] {
+  return [
+    ...response.requirements,
+
+    ...aggregateOptionResourceRequirements(
+      response
+        .optionRequirements,
+    ),
+  ];
 }
 
 export default function ReservationDetailPage() {
@@ -1241,26 +2092,53 @@ export default function ReservationDetailPage() {
         );
       }
 
-      const options = result as ReservationResourcesResponse;
+      const options =
+        result as ReservationResourcesResponse;
 
-      setResourceOptions(options);
-
-      const firstPendingRequirement = options.requirements.find(
-        (requirement) =>
-          !requirement.satisfied &&
-          requirement.resources.some((resource) => resource.available),
-      );
-
-      if (firstPendingRequirement) {
-        const requirementKey = `${firstPendingRequirement.reservationServiceId}:${firstPendingRequirement.resourceType.id}`;
-
-        const firstAvailableResource = firstPendingRequirement.resources.find(
-          (resource) => resource.available,
+      const requirements =
+        getReservationResourceRequirements(
+          options,
         );
 
-        setSelectedRequirementKey(requirementKey);
+      setResourceOptions(
+        options,
+      );
 
-        setSelectedResourceId(firstAvailableResource?.id ?? "");
+      const firstPendingRequirement =
+        requirements.find(
+          (requirement) =>
+            !requirement.satisfied &&
+            requirement.resources.some(
+              (resource) =>
+                resource.available,
+            ),
+        );
+
+      if (
+        firstPendingRequirement
+      ) {
+        const requirementKey =
+          getResourceRequirementKey(
+            firstPendingRequirement,
+          );
+
+        const firstAvailableResource =
+          firstPendingRequirement
+            .resources
+            .find(
+              (resource) =>
+                resource.available,
+            );
+
+        setSelectedRequirementKey(
+          requirementKey,
+        );
+
+        setSelectedResourceId(
+          firstAvailableResource
+            ?.id ??
+            "",
+        );
       }
     } catch (error) {
       setResourceError(
@@ -1280,14 +2158,32 @@ export default function ReservationDetailPage() {
       return;
     }
 
-    const selectedRequirement = resourceOptions.requirements.find(
-      (requirement) =>
-        `${requirement.reservationServiceId}:${requirement.resourceType.id}` ===
-        selectedRequirementKey,
-    );
+    const selectedRequirement =
+      getReservationResourceRequirements(
+        resourceOptions,
+      ).find(
+        (requirement) =>
+          getResourceRequirementKey(
+            requirement,
+          ) ===
+          selectedRequirementKey,
+      );
 
     if (!selectedRequirement) {
       setResourceError("No fue posible determinar el requisito seleccionado.");
+
+      return;
+    }
+
+    if (
+      selectedRequirement.source ===
+        "OPTION" &&
+      !selectedRequirement
+        .assignmentTargetReservationOptionId
+    ) {
+      setResourceError(
+        "Todos los recursos requeridos por este complemento ya están asignados.",
+      );
 
       return;
     }
@@ -1296,19 +2192,50 @@ export default function ReservationDetailPage() {
     setResourceError(null);
 
     try {
-      const response = await fetch(`/api/reservations/${reservationId}/room`, {
-        method: "PATCH",
+      const assignmentEndpoint =
+        selectedRequirement.source ===
+        "OPTION"
+          ? `/api/reservations/${reservationId}/resources`
+          : `/api/reservations/${reservationId}/room`;
 
-        headers: {
-          "Content-Type": "application/json",
-        },
+      const assignmentBody =
+        selectedRequirement.source ===
+        "OPTION"
+          ? {
+              resourceId:
+                selectedResourceId,
 
-        body: JSON.stringify({
-          resourceId: selectedResourceId,
+              reservationOptionId:
+                selectedRequirement
+                  .assignmentTargetReservationOptionId,
+            }
+          : {
+              resourceId:
+                selectedResourceId,
 
-          reservationServiceId: selectedRequirement.reservationServiceId,
-        }),
-      });
+              reservationServiceId:
+                selectedRequirement
+                  .reservationServiceId,
+            };
+
+      const response =
+        await fetch(
+          assignmentEndpoint,
+          {
+            method:
+              "PATCH",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify(
+                assignmentBody,
+              ),
+          },
+        );
 
       const result = await response.json();
 
@@ -1320,7 +2247,13 @@ export default function ReservationDetailPage() {
         );
       }
 
-      const assignedResource = result.reservation?.resource;
+      const assignedResource =
+        selectedRequirement.source ===
+        "OPTION"
+          ? result.assignment
+              ?.resource
+          : result.reservation
+              ?.resource;
 
       setResourceDialogOpen(false);
 
@@ -1656,6 +2589,8 @@ export default function ReservationDetailPage() {
 
     setOptionAddError(null);
     setOptionAddSuccess(null);
+
+    setOptionRemoveSuccess(null);
 
     setPostBookingOptions([]);
 
@@ -2010,6 +2945,8 @@ export default function ReservationDetailPage() {
     setOptionAddError(null);
     setOptionAddSuccess(null);
 
+    setOptionRemoveSuccess(null);
+
     try {
       const response =
         await fetch(
@@ -2111,7 +3048,7 @@ export default function ReservationDetailPage() {
     }
 
     const option =
-      data.options.find(
+      reservationOptionGroups.find(
         (item) =>
           item.id === reservationOptionId,
       ) ?? null;
@@ -2146,6 +3083,8 @@ export default function ReservationDetailPage() {
 
     setOptionRemoveSuccess(null);
 
+    setOptionAddSuccess(null);
+
     setOptionRemoveDialogOpen(true);
   }
 
@@ -2155,7 +3094,7 @@ export default function ReservationDetailPage() {
     }
 
     const option =
-      data.options.find(
+      reservationOptionGroups.find(
         (item) =>
           item.id ===
           selectedReservationOptionId,
@@ -2204,6 +3143,8 @@ export default function ReservationDetailPage() {
 
     setOptionRemoveSuccess(null);
 
+    setOptionAddSuccess(null);
+
     try {
       const response =
         await fetch(
@@ -2244,7 +3185,9 @@ export default function ReservationDetailPage() {
 
       const fullyRemoved =
         removeOptionalQuantity ===
-        option.activeOptionalQuantity;
+          option.activeOptionalQuantity &&
+        option.includedQuantity ===
+          0;
 
       setOptionRemoveDialogOpen(false);
 
@@ -2494,8 +3437,13 @@ export default function ReservationDetailPage() {
     ) ??
     null;
 
+  const reservationOptionGroups =
+    getReservationOptionGroups(
+      data.options,
+    );
+
   const selectedReservationOption =
-    data.options.find(
+    reservationOptionGroups.find(
       (option) =>
         option.id ===
         selectedReservationOptionId,
@@ -2592,12 +3540,33 @@ export default function ReservationDetailPage() {
   const resourceActionLabel =
     business.type.slug === "hotel" ? "Asignar habitación" : "Asignar recurso";
 
+  const resourceRequirements =
+    resourceOptions
+      ? getReservationResourceRequirements(
+          resourceOptions,
+        )
+      : [];
+
   const selectedRequirement =
-    resourceOptions?.requirements.find(
+    resourceRequirements.find(
       (requirement) =>
-        `${requirement.reservationServiceId}:${requirement.resourceType.id}` ===
+        getResourceRequirementKey(
+          requirement,
+        ) ===
         selectedRequirementKey,
     ) ?? null;
+
+  const resourceDialogTitle =
+    selectedRequirement?.source ===
+    "OPTION"
+      ? "Asignar recurso de complemento"
+      : resourceActionLabel;
+
+  const resourceSubmitLabel =
+    selectedRequirement?.source ===
+    "OPTION"
+      ? "Asignar recurso"
+      : resourceActionLabel;
 
   return (
     <div className="mx-auto w-full max-w-[1500px]">
@@ -3109,13 +4078,13 @@ export default function ReservationDetailPage() {
               </div>
             )}
 
-            {data.options.filter((option) => option.activeQuantity > 0).length === 0 ? (
+            {reservationOptionGroups.filter((option) => option.activeQuantity > 0).length === 0 ? (
               <p className="p-5 text-sm text-zinc-500">
                 Esta reserva no tiene complementos registrados.
               </p>
             ) : (
               <div className="divide-y divide-zinc-100">
-                {data.options.filter((option) => option.activeQuantity > 0).map((option) => (
+                {reservationOptionGroups.filter((option) => option.activeQuantity > 0).map((option) => (
                   <div key={option.id} className="p-5">
                     <div className="flex flex-col justify-between gap-4 sm:flex-row">
                       <div>
@@ -3174,25 +4143,39 @@ export default function ReservationDetailPage() {
                             Cantidad activa: {option.activeQuantity}
                           </p>
 
-                          {option.optionalQuantity > 0 && (
+                          {option.memberCount > 1 && (
                             <p>
-                              Precio adicional unitario:{" "}
-                              {formatMoney(
-                                option.unitPrice,
-                                business.currency,
-                              )}
+                              Movimientos acumulados: {option.memberCount}
                             </p>
                           )}
 
-                          <p>
-                            Modalidad:{" "}
-                            {option.pricingBase.replaceAll("_", " ")} ·{" "}
-                            {option.pricingFrequency.replaceAll("_", " ")}
-                          </p>
+                          {option.hasMixedPricing ? (
+                            <p>
+                              Precio y modalidad: varios movimientos históricos
+                            </p>
+                          ) : (
+                            <>
+                              {option.optionalQuantity > 0 && (
+                                <p>
+                                  Precio adicional unitario:{" "}
+                                  {formatMoney(
+                                    option.unitPrice,
+                                    business.currency,
+                                  )}
+                                </p>
+                              )}
 
-                          <p>
-                            Unidades de cobro: {option.billingUnits}
-                          </p>
+                              <p>
+                                Modalidad:{" "}
+                                {option.pricingBase.replaceAll("_", " ")} ·{" "}
+                                {option.pricingFrequency.replaceAll("_", " ")}
+                              </p>
+
+                              <p>
+                                Unidades de cobro: {option.billingUnits}
+                              </p>
+                            </>
+                          )}
                         </div>
 
                         {option.startAt && option.endAt && (
@@ -3724,8 +4707,8 @@ export default function ReservationDetailPage() {
                     selectedReservationOption.activeOptionalQuantity > 0 && (
                       <div className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-600">
                         Se retirará toda la cantidad opcional activa de este
-                        complemento. La línea histórica permanecerá en la
-                        reserva.
+                        complemento. Sus movimientos históricos permanecerán
+                        en la reserva.
                       </div>
                     )}
 
@@ -3806,7 +4789,9 @@ export default function ReservationDetailPage() {
                       ? "Procesando..."
                       : Number(optionRemoveQuantity) ===
                             selectedReservationOption.activeOptionalQuantity
-                        ? "Quitar complemento"
+                        ? selectedReservationOption.includedQuantity === 0
+                          ? "Quitar complemento"
+                          : "Retirar adicionales"
                         : "Reducir complemento"}
                   </button>
                 </div>
@@ -4278,7 +5263,7 @@ export default function ReservationDetailPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl bg-white shadow-xl">
             <div className="border-b border-zinc-200 px-5 py-4">
-              <h2 className="font-semibold">{resourceActionLabel}</h2>
+              <h2 className="font-semibold">{resourceDialogTitle}</h2>
 
               <p className="mt-1 text-sm text-zinc-500">
                 Reserva {reservation.confirmationCode}
@@ -4296,15 +5281,18 @@ export default function ReservationDetailPage() {
                 </div>
               ) : resourceOptions ? (
                 <div className="space-y-5">
-                  {resourceOptions.requirements.length === 0 ? (
+                  {resourceRequirements.length === 0 ? (
                     <div className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-500">
-                      El servicio no requiere recursos físicos.
+                      La reserva no requiere recursos físicos.
                     </div>
                   ) : (
                     <>
                       <div className="space-y-3">
-                        {resourceOptions.requirements.map((requirement) => {
-                          const requirementKey = `${requirement.reservationServiceId}:${requirement.resourceType.id}`;
+                        {resourceRequirements.map((requirement) => {
+                          const requirementKey =
+                            getResourceRequirementKey(
+                              requirement,
+                            );
 
                           return (
                             <label
@@ -4339,13 +5327,36 @@ export default function ReservationDetailPage() {
                                 />
 
                                 <div className="min-w-0 flex-1">
-                                  <p className="font-medium">
-                                    {requirement.service.name}
-                                  </p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <p className="font-medium">
+                                      {requirement.source === "OPTION"
+                                        ? requirement.option.name
+                                        : requirement.service.name}
+                                    </p>
+
+                                    {requirement.source === "OPTION" && (
+                                      <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+                                        Complemento
+                                      </span>
+                                    )}
+                                  </div>
 
                                   <p className="mt-1 text-sm text-zinc-500">
-                                    {requirement.resourceType.name}
+                                    {requirement.source === "OPTION"
+                                      ? `Complemento de ${requirement.service.name} · ${requirement.resourceType.name}`
+                                      : requirement.resourceType.name}
                                   </p>
+
+                                  {requirement.source === "OPTION" && (
+                                    <p className="mt-1 text-xs text-zinc-500">
+                                      Cantidad activa:{" "}
+                                      {requirement.activeQuantity}
+                                      {" · "}
+                                      Requiere{" "}
+                                      {requirement.requiredQuantityPerUnit}{" "}
+                                      recurso(s) por unidad
+                                    </p>
+                                  )}
 
                                   <p className="mt-2 text-xs text-zinc-500">
                                     Asignados: {requirement.assignedQuantity} de{" "}
@@ -4423,8 +5434,8 @@ export default function ReservationDetailPage() {
                             (resource) => resource.available,
                           ) && (
                             <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                              No hay recursos disponibles para este requisito en
-                              las fechas de la reserva.
+                              No hay recursos disponibles para este requisito
+                              durante el intervalo requerido.
                             </div>
                           )}
                         </div>
@@ -4465,7 +5476,7 @@ export default function ReservationDetailPage() {
                 onClick={() => void handleAssignResource()}
                 className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {resourceSubmitting ? "Asignando..." : resourceActionLabel}
+                {resourceSubmitting ? "Asignando..." : resourceSubmitLabel}
               </button>
             </div>
           </div>
