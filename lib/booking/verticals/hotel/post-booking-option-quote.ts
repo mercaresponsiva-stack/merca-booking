@@ -491,6 +491,9 @@ export async function quoteHotelPostBookingOptions({
 
         optionalQuantity:
           true,
+
+        removedOptionalQuantity:
+          true,
       },
     });
 
@@ -522,8 +525,11 @@ export async function quoteHotelPostBookingOptions({
       existingOption
         .serviceOptionId,
       previous +
-        existingOption
-          .optionalQuantity,
+        Math.max(
+          existingOption.optionalQuantity -
+            existingOption.removedOptionalQuantity,
+          0,
+        ),
     );
   }
 

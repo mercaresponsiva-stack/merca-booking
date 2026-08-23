@@ -482,6 +482,13 @@ type ReservationDetailResponse = {
     includedQuantity: number;
 
     optionalQuantity: number;
+    removedOptionalQuantity: number;
+
+    activeOptionalQuantity: number;
+
+    activeQuantity: number;
+
+    isFullyRemoved: boolean;
 
     unitPrice: number;
 
@@ -1004,6 +1011,26 @@ export default function ReservationDetailPage() {
   const [optionAddSuccess, setOptionAddSuccess] =
     useState<string | null>(null);
 
+  const [optionRemoveDialogOpen, setOptionRemoveDialogOpen] =
+    useState(false);
+
+  const [selectedReservationOptionId, setSelectedReservationOptionId] =
+    useState("");
+
+  const [optionRemoveQuantity, setOptionRemoveQuantity] =
+    useState("1");
+
+  const [optionRemoveReason, setOptionRemoveReason] =
+    useState("");
+
+  const [optionRemoveSubmitting, setOptionRemoveSubmitting] =
+    useState(false);
+
+  const [optionRemoveError, setOptionRemoveError] =
+    useState<string | null>(null);
+
+  const [optionRemoveSuccess, setOptionRemoveSuccess] =
+    useState<string | null>(null);
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
 
   const [paymentMethod, setPaymentMethod] = useState<
@@ -1061,27 +1088,31 @@ export default function ReservationDetailPage() {
 
   const [error, setError] = useState<string | null>(null);
 
+  const fetchReservation = useCallback(async () => {
+    const response = await fetch(`/api/reservations/${reservationId}`, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    const result = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        typeof result.error === "string"
+          ? result.error
+          : "No fue posible cargar la reserva",
+      );
+    }
+
+    return result as ReservationDetailResponse;
+  }, [reservationId]);
+
   const loadReservation = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
     try {
-      const response = await fetch(`/api/reservations/${reservationId}`, {
-        method: "GET",
-        cache: "no-store",
-      });
+      const result = await fetchReservation();
 
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          typeof result.error === "string"
-            ? result.error
-            : "No fue posible cargar la reserva",
-        );
-      }
-
-      setData(result as ReservationDetailResponse);
+      setData(result);
+      setError(null);
     } catch (error) {
       setError(
         error instanceof Error
@@ -1091,11 +1122,41 @@ export default function ReservationDetailPage() {
     } finally {
       setLoading(false);
     }
-  }, [reservationId]);
+  }, [fetchReservation]);
 
   useEffect(() => {
-    void loadReservation();
-  }, [loadReservation]);
+    let ignore = false;
+
+    void fetchReservation()
+      .then((result) => {
+        if (ignore) {
+          return;
+        }
+
+        setData(result);
+        setError(null);
+      })
+      .catch((error: unknown) => {
+        if (ignore) {
+          return;
+        }
+
+        setError(
+          error instanceof Error
+            ? error.message
+            : "No fue posible cargar la reserva",
+        );
+      })
+      .finally(() => {
+        if (!ignore) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      ignore = true;
+    };
+  }, [fetchReservation]);
 
   async function handleStatusChange() {
     if (!targetStatus) {
@@ -1531,7 +1592,7 @@ export default function ReservationDetailPage() {
       .reduce(
         (sum, option) =>
           sum +
-          option.optionalQuantity,
+          option.activeOptionalQuantity,
         0,
       );
   }
@@ -2042,6 +2103,174 @@ export default function ReservationDetailPage() {
     }
   }
 
+  function openOptionRemoveDialog(
+    reservationOptionId: string,
+  ) {
+    if (!data) {
+      return;
+    }
+
+    const option =
+      data.options.find(
+        (item) =>
+          item.id === reservationOptionId,
+      ) ?? null;
+
+    if (!option) {
+      setOptionRemoveError(
+        "No se encontró el complemento seleccionado.",
+      );
+
+      return;
+    }
+
+    if (
+      option.activeOptionalQuantity <= 0
+    ) {
+      setOptionRemoveError(
+        "Este complemento ya no tiene cantidad opcional activa para retirar.",
+      );
+
+      return;
+    }
+
+    setSelectedReservationOptionId(
+      option.id,
+    );
+
+    setOptionRemoveQuantity("1");
+
+    setOptionRemoveReason("");
+
+    setOptionRemoveError(null);
+
+    setOptionRemoveSuccess(null);
+
+    setOptionRemoveDialogOpen(true);
+  }
+
+  async function handleRemoveReservationOption() {
+    if (!data) {
+      return;
+    }
+
+    const option =
+      data.options.find(
+        (item) =>
+          item.id ===
+          selectedReservationOptionId,
+      ) ?? null;
+
+    if (!option) {
+      setOptionRemoveError(
+        "No se encontró el complemento seleccionado.",
+      );
+
+      return;
+    }
+
+    const removeOptionalQuantity =
+      Number(
+        optionRemoveQuantity,
+      );
+
+    if (
+      !Number.isInteger(
+        removeOptionalQuantity,
+      ) ||
+      removeOptionalQuantity <= 0
+    ) {
+      setOptionRemoveError(
+        "La cantidad a retirar debe ser un número entero mayor que cero.",
+      );
+
+      return;
+    }
+
+    if (
+      removeOptionalQuantity >
+      option.activeOptionalQuantity
+    ) {
+      setOptionRemoveError(
+        `Solo puedes retirar hasta ${option.activeOptionalQuantity} unidad(es) opcional(es) activas.`,
+      );
+
+      return;
+    }
+
+    setOptionRemoveSubmitting(true);
+
+    setOptionRemoveError(null);
+
+    setOptionRemoveSuccess(null);
+
+    try {
+      const response =
+        await fetch(
+          `/api/reservations/${reservationId}/options/${option.id}/remove`,
+          {
+            method: "PATCH",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                changedById:
+                  TEMP_RECEPTION_USER_ID,
+
+                removeOptionalQuantity,
+
+                reason:
+                  optionRemoveReason.trim() ||
+                  undefined,
+              }),
+          },
+        );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+            "string"
+            ? result.error
+            : "No fue posible reducir el complemento.",
+        );
+      }
+
+      const fullyRemoved =
+        removeOptionalQuantity ===
+        option.activeOptionalQuantity;
+
+      setOptionRemoveDialogOpen(false);
+
+      setSelectedReservationOptionId("");
+
+      setOptionRemoveQuantity("1");
+
+      setOptionRemoveReason("");
+
+      setOptionRemoveSuccess(
+        fullyRemoved
+          ? `${option.name} retirado correctamente.`
+          : `${option.name} reducido correctamente.`,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setOptionRemoveError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible reducir el complemento.",
+      );
+    } finally {
+      setOptionRemoveSubmitting(false);
+    }
+  }
   function openRefundGroupDialog(
     group: RefundGroup,
     targetStatus: RefundAdminTargetStatus,
@@ -2226,7 +2455,11 @@ export default function ReservationDetailPage() {
 
           <button
             type="button"
-            onClick={() => void loadReservation()}
+            onClick={() => {
+              setLoading(true);
+              setError(null);
+              void loadReservation();
+            }}
             className="mt-4 rounded-lg border border-zinc-300 px-4 py-2 text-sm"
           >
             Reintentar
@@ -2260,6 +2493,13 @@ export default function ReservationDetailPage() {
         selectedPostBookingOptionId,
     ) ??
     null;
+
+  const selectedReservationOption =
+    data.options.find(
+      (option) =>
+        option.id ===
+        selectedReservationOptionId,
+    ) ?? null;
 
   const selectedExistingOptionalQuantity =
     selectedPostBookingOption
@@ -2336,6 +2576,14 @@ export default function ReservationDetailPage() {
   const availableStatusTransitions = isOperationalStatus(reservation.status)
     ? STATUS_TRANSITIONS[reservation.status]
     : [];
+
+  const canRemoveOptions = [
+    "PENDING",
+    "CONFIRMED",
+    "CHECKED_IN",
+  ].includes(
+    reservation.status,
+  );
 
   const canAssignResources = ["PENDING", "CONFIRMED", "CHECKED_IN"].includes(
     reservation.status,
@@ -2842,19 +3090,32 @@ export default function ReservationDetailPage() {
               </div>
             )}
 
+            {optionRemoveSuccess && (
+              <div className="border-b border-emerald-200 bg-emerald-50 px-5 py-3 text-sm text-emerald-800">
+                {optionRemoveSuccess}
+              </div>
+            )}
+
             {!optionDialogOpen && optionAddError && (
               <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
                 {optionAddError}
               </div>
             )}
 
-            {data.options.length === 0 ? (
+
+            {!optionRemoveDialogOpen && optionRemoveError && (
+              <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">
+                {optionRemoveError}
+              </div>
+            )}
+
+            {data.options.filter((option) => option.activeQuantity > 0).length === 0 ? (
               <p className="p-5 text-sm text-zinc-500">
                 Esta reserva no tiene complementos registrados.
               </p>
             ) : (
               <div className="divide-y divide-zinc-100">
-                {data.options.map((option) => (
+                {data.options.filter((option) => option.activeQuantity > 0).map((option) => (
                   <div key={option.id} className="p-5">
                     <div className="flex flex-col justify-between gap-4 sm:flex-row">
                       <div>
@@ -2882,7 +3143,7 @@ export default function ReservationDetailPage() {
 
                         <div className="mt-3 space-y-1 text-sm text-zinc-600">
                           <p>
-                            Cantidad total: {option.quantity}
+                            Cantidad original: {option.quantity}
                           </p>
 
                           {option.includedQuantity > 0 && (
@@ -2893,9 +3154,25 @@ export default function ReservationDetailPage() {
 
                           {option.optionalQuantity > 0 && (
                             <p>
-                              Adicional: {option.optionalQuantity}
+                              Opcional original: {option.optionalQuantity}
                             </p>
                           )}
+
+                          {option.removedOptionalQuantity > 0 && (
+                            <p>
+                              Retirada: {option.removedOptionalQuantity}
+                            </p>
+                          )}
+
+                          {option.optionalQuantity > 0 && (
+                            <p>
+                              Opcional activa: {option.activeOptionalQuantity}
+                            </p>
+                          )}
+
+                          <p>
+                            Cantidad activa: {option.activeQuantity}
+                          </p>
 
                           {option.optionalQuantity > 0 && (
                             <p>
@@ -2968,12 +3245,35 @@ export default function ReservationDetailPage() {
                         <p className="font-medium">
                           {formatMoney(option.subtotal, business.currency)}
                         </p>
+                        {option.isFullyRemoved && (
+                          <p className="mt-1 text-xs font-medium text-zinc-500">
+                            Retirado completamente
+                          </p>
+                        )}
 
                         {option.includedQuantity > 0 &&
-                          option.optionalQuantity === 0 && (
+                          option.activeOptionalQuantity === 0 && (
                             <p className="mt-1 text-xs text-zinc-500">
                               Sin cargo adicional
                             </p>
+                          )}
+
+                        {canRemoveOptions &&
+                          option.activeOptionalQuantity > 0 && (
+                            <button
+                              type="button"
+                              disabled={
+                                financialState.hasRefundPending
+                              }
+                              onClick={() =>
+                                openOptionRemoveDialog(
+                                  option.id,
+                                )
+                              }
+                              className="mt-3 rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Reducir / quitar
+                            </button>
                           )}
                       </div>
                     </div>
@@ -3323,6 +3623,191 @@ export default function ReservationDetailPage() {
                     {optionAddSubmitting
                       ? "Agregando..."
                       : "Agregar complemento"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {optionRemoveDialogOpen && selectedReservationOption && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+              <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-xl">
+                <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
+                  <div>
+                    <h2 className="font-semibold">
+                      Reducir / quitar complemento
+                    </h2>
+
+                    <p className="mt-1 text-sm text-zinc-500">
+                      {selectedReservationOption.name}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={optionRemoveSubmitting}
+                    onClick={() => {
+                      setOptionRemoveDialogOpen(false);
+                      setSelectedReservationOptionId("");
+                      setOptionRemoveQuantity("1");
+                      setOptionRemoveReason("");
+                      setOptionRemoveError(null);
+                    }}
+                    className="rounded-lg border border-zinc-300 px-3 py-2 text-sm disabled:opacity-50"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+
+                <div className="space-y-5 p-5">
+                  <div className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-600">
+                    <p>
+                      Opcional original:{" "}
+                      {selectedReservationOption.optionalQuantity}
+                    </p>
+
+                    {selectedReservationOption.removedOptionalQuantity > 0 && (
+                      <p>
+                        Retirada anteriormente:{" "}
+                        {selectedReservationOption.removedOptionalQuantity}
+                      </p>
+                    )}
+
+                    <p>
+                      Opcional activa:{" "}
+                      {selectedReservationOption.activeOptionalQuantity}
+                    </p>
+
+                    {selectedReservationOption.includedQuantity > 0 && (
+                      <p>
+                        Incluida:{" "}
+                        {selectedReservationOption.includedQuantity}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="reservation-option-remove-quantity"
+                      className="text-sm font-medium"
+                    >
+                      Cantidad a retirar
+                    </label>
+
+                    <input
+                      id="reservation-option-remove-quantity"
+                      type="number"
+                      min={1}
+                      max={
+                        selectedReservationOption.activeOptionalQuantity
+                      }
+                      value={optionRemoveQuantity}
+                      disabled={optionRemoveSubmitting}
+                      onChange={(event) => {
+                        setOptionRemoveQuantity(
+                          event.target.value,
+                        );
+
+                        setOptionRemoveError(null);
+                      }}
+                      className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm"
+                    />
+
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Puedes retirar entre 1 y{" "}
+                      {selectedReservationOption.activeOptionalQuantity}.
+                    </p>
+                  </div>
+
+                  {Number(optionRemoveQuantity) ===
+                    selectedReservationOption.activeOptionalQuantity &&
+                    selectedReservationOption.activeOptionalQuantity > 0 && (
+                      <div className="rounded-lg bg-zinc-50 p-4 text-sm text-zinc-600">
+                        Se retirará toda la cantidad opcional activa de este
+                        complemento. La línea histórica permanecerá en la
+                        reserva.
+                      </div>
+                    )}
+
+                  <div>
+                    <label
+                      htmlFor="reservation-option-remove-reason"
+                      className="text-sm font-medium"
+                    >
+                      Motivo
+                      <span className="ml-1 font-normal text-zinc-500">
+                        (opcional)
+                      </span>
+                    </label>
+
+                    <textarea
+                      id="reservation-option-remove-reason"
+                      rows={3}
+                      value={optionRemoveReason}
+                      disabled={optionRemoveSubmitting}
+                      onChange={(event) =>
+                        setOptionRemoveReason(
+                          event.target.value,
+                        )
+                      }
+                      className="mt-2 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Ej. El huésped ya no necesita este complemento"
+                    />
+                  </div>
+
+                  {financialState.hasRefundPending && (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                      No se puede modificar el complemento mientras exista
+                      una devolución pendiente o en proceso.
+                    </div>
+                  )}
+
+                  {optionRemoveError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                      {optionRemoveError}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col-reverse gap-3 border-t border-zinc-200 px-5 py-4 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    disabled={optionRemoveSubmitting}
+                    onClick={() => {
+                      setOptionRemoveDialogOpen(false);
+                      setSelectedReservationOptionId("");
+                      setOptionRemoveQuantity("1");
+                      setOptionRemoveReason("");
+                      setOptionRemoveError(null);
+                    }}
+                    className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={
+                      optionRemoveSubmitting ||
+                      financialState.hasRefundPending ||
+                      !Number.isInteger(
+                        Number(optionRemoveQuantity),
+                      ) ||
+                      Number(optionRemoveQuantity) <= 0 ||
+                      Number(optionRemoveQuantity) >
+                        selectedReservationOption.activeOptionalQuantity
+                    }
+                    onClick={() =>
+                      void handleRemoveReservationOption()
+                    }
+                    className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {optionRemoveSubmitting
+                      ? "Procesando..."
+                      : Number(optionRemoveQuantity) ===
+                            selectedReservationOption.activeOptionalQuantity
+                        ? "Quitar complemento"
+                        : "Reducir complemento"}
                   </button>
                 </div>
               </div>

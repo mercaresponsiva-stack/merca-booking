@@ -2,6 +2,10 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  resolveReservationOptionActiveQuantity,
+} from "@/lib/booking/reservation-option-quantity";
+
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
@@ -357,6 +361,44 @@ export async function GET(_request: Request, context: RouteContext) {
 
         optionalQuantity:
           item.optionalQuantity,
+        removedOptionalQuantity:
+          item.removedOptionalQuantity,
+
+        activeOptionalQuantity:
+          resolveReservationOptionActiveQuantity({
+            includedQuantity:
+              item.includedQuantity,
+
+            optionalQuantity:
+              item.optionalQuantity,
+
+            removedOptionalQuantity:
+              item.removedOptionalQuantity,
+          }).activeOptionalQuantity,
+
+        activeQuantity:
+          resolveReservationOptionActiveQuantity({
+            includedQuantity:
+              item.includedQuantity,
+
+            optionalQuantity:
+              item.optionalQuantity,
+
+            removedOptionalQuantity:
+              item.removedOptionalQuantity,
+          }).activeQuantity,
+
+        isFullyRemoved:
+          resolveReservationOptionActiveQuantity({
+            includedQuantity:
+              item.includedQuantity,
+
+            optionalQuantity:
+              item.optionalQuantity,
+
+            removedOptionalQuantity:
+              item.removedOptionalQuantity,
+          }).isFullyRemoved,
 
         unitPrice:
           Number(item.unitPrice),
