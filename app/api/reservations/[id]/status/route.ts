@@ -2,7 +2,6 @@ import { getReservationTransitionPolicyViolation } from "@/lib/booking/reservati
 import {
   isReservationStatus,
   isReservationTransitionAllowed,
-  type ReservationStatus,
 } from "@/lib/booking/reservation-state";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { NextRequest, NextResponse } from "next/server";
@@ -67,6 +66,44 @@ export async function PATCH(
               },
             },
 
+            options: {
+              select: {
+                includedQuantity:
+                  true,
+
+                optionalQuantity:
+                  true,
+
+                removedOptionalQuantity:
+                  true,
+
+                serviceOption: {
+                  select: {
+                    resourceTypes: {
+                      select: {
+                        resourceTypeId:
+                          true,
+
+                        requiredQuantity:
+                          true,
+                      },
+                    },
+                  },
+                },
+
+                resources: {
+                  select: {
+                    resource: {
+                      select: {
+                        resourceTypeId:
+                          true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+
             payments: {
               include: {
                 refunds: {
@@ -122,6 +159,8 @@ export async function PATCH(
           targetStatus: status,
           paymentSummary,
           services: reservation.services,
+
+          options: reservation.options,
         });
 
         if (policyViolation) {
@@ -340,6 +379,26 @@ export async function PATCH(
           success: false,
           error:
             "No se puede realizar el check-in hasta asignar todos los recursos físicos requeridos por la reserva",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // OPTION RESOURCE REQUIRED FOR CHECK-IN
+    // ─────────────────────────────────────────────
+
+    if (
+      error instanceof Error &&
+      error.message === "OPTION_RESOURCES_REQUIRED_FOR_CHECK_IN"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "No se puede realizar el check-in hasta asignar todos los recursos físicos requeridos por los complementos activos",
         },
         {
           status: 409,
