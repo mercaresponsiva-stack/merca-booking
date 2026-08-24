@@ -48,6 +48,92 @@ export type ResourceIntervalCheckResult =
       };
     };
 
+type AssignedResourceEffectiveIntervalInput = {
+  reservationStartAt: Date;
+  reservationEndAt: Date;
+
+  optionStartAt:
+    Date | null;
+
+  optionEndAt:
+    Date | null;
+};
+
+/*
+ * Resuelve el intervalo que realmente ocupa
+ * una asignación física:
+ *
+ * ReservationService:
+ * usa el intervalo general.
+ *
+ * ReservationOption null/null:
+ * hereda el intervalo general.
+ *
+ * ReservationOption con fechas:
+ * conserva su intervalo propio.
+ */
+function resolveAssignedResourceEffectiveInterval({
+  reservationStartAt,
+  reservationEndAt,
+
+  optionStartAt,
+  optionEndAt,
+}: AssignedResourceEffectiveIntervalInput) {
+  const hasOptionStartAt =
+    optionStartAt !==
+    null;
+
+  const hasOptionEndAt =
+    optionEndAt !==
+    null;
+
+  if (
+    hasOptionStartAt !==
+    hasOptionEndAt
+  ) {
+    throw new Error(
+      "RESERVATION_OPTION_INTERVAL_INCOMPLETE",
+    );
+  }
+
+  const startAt =
+    optionStartAt ??
+    reservationStartAt;
+
+  const endAt =
+    optionEndAt ??
+    reservationEndAt;
+
+  if (
+    endAt <=
+    startAt
+  ) {
+    throw new Error(
+      "INVALID_RESERVATION_RESOURCE_EFFECTIVE_INTERVAL",
+    );
+  }
+
+  return {
+    startAt,
+    endAt,
+  };
+}
+
+function intervalsOverlap(
+  firstStartAt: Date,
+  firstEndAt: Date,
+
+  secondStartAt: Date,
+  secondEndAt: Date,
+) {
+  return (
+    firstStartAt <
+      secondEndAt &&
+    firstEndAt >
+      secondStartAt
+  );
+}
+
 /*
  * Comprueba si un Resource concreto
  * puede utilizarse durante un intervalo.
@@ -87,35 +173,106 @@ export async function checkResourceForInterval({
   // Esto es fundamental durante reschedule.
   // ─────────────────────────────────────────────
 
-  const overlappingAssignment = await db.reservationResource.findFirst({
-    where: {
-      resourceId,
+  /*
+   * No filtramos por Reservation.startAt/endAt
+   * dentro de SQL.
+   *
+   * Una asignación de ReservationOption puede
+   * tener un intervalo propio distinto al de
+   * su Reservation.
+   */
+  const assignmentCandidates =
+    await db.reservationResource.findMany({
+      where: {
+        resourceId,
 
-      reservationId: {
-        not: reservationId,
-      },
-
-      reservation: {
-        businessId,
-
-        status: {
-          in: [...ACTIVE_RESERVATION_STATUSES],
+        reservationId: {
+          not:
+            reservationId,
         },
 
-        ...getOverlapWhere(startAt, endAt),
-      },
-    },
+        reservation: {
+          businessId,
 
-    select: {
-      reservation: {
-        select: {
-          id: true,
-
-          confirmationCode: true,
+          status: {
+            in: [
+              ...ACTIVE_RESERVATION_STATUSES,
+            ],
+          },
         },
       },
-    },
-  });
+
+      select: {
+        reservation: {
+          select: {
+            id:
+              true,
+
+            confirmationCode:
+              true,
+
+            startAt:
+              true,
+
+            endAt:
+              true,
+          },
+        },
+
+        reservationOption: {
+          select: {
+            startAt:
+              true,
+
+            endAt:
+              true,
+          },
+        },
+      },
+    });
+
+  const overlappingAssignment =
+    assignmentCandidates.find(
+      (
+        assignment,
+      ) => {
+        const effectiveInterval =
+          resolveAssignedResourceEffectiveInterval({
+            reservationStartAt:
+              assignment
+                .reservation
+                .startAt,
+
+            reservationEndAt:
+              assignment
+                .reservation
+                .endAt,
+
+            optionStartAt:
+              assignment
+                .reservationOption
+                ?.startAt ??
+              null,
+
+            optionEndAt:
+              assignment
+                .reservationOption
+                ?.endAt ??
+              null,
+          });
+
+        return intervalsOverlap(
+          effectiveInterval
+            .startAt,
+
+          effectiveInterval
+            .endAt,
+
+          startAt,
+          endAt,
+        );
+      },
+    );
 
   if (overlappingAssignment) {
     return {
@@ -324,15 +481,26 @@ export async function evaluateAssignedResourcesForInterval({
      * -> null/null hereda el nuevo intervalo
      *    general.
      */
-    const assignmentStartAt =
-      assignment.reservationOption
-        ?.startAt ??
-      startAt;
+    const assignmentInterval =
+      resolveAssignedResourceEffectiveInterval({
+        reservationStartAt:
+          startAt,
 
-    const assignmentEndAt =
-      assignment.reservationOption
-        ?.endAt ??
-      endAt;
+        reservationEndAt:
+          endAt,
+
+        optionStartAt:
+          assignment
+            .reservationOption
+            ?.startAt ??
+          null,
+
+        optionEndAt:
+          assignment
+            .reservationOption
+            ?.endAt ??
+          null,
+      });
 
     // ───────────────────────────────────────────
     // INACTIVE RESOURCE
@@ -422,10 +590,12 @@ export async function evaluateAssignedResourcesForInterval({
       resourceId: assignment.resourceId,
 
       startAt:
-        assignmentStartAt,
+        assignmentInterval
+          .startAt,
 
       endAt:
-        assignmentEndAt,
+        assignmentInterval
+          .endAt,
 
       db,
     });
