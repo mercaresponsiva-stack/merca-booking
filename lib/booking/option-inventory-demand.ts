@@ -14,7 +14,10 @@ import { prisma } from "@/lib/prisma";
  */
 export type OptionInventoryDemandDb = Pick<
   typeof prisma,
-  "reservationOption"
+  | "reservationOption"
+  | "reservation"
+  | "serviceOptionResourceType"
+  | "reservationResource"
 >;
 
 export type ReservationOptionDemandItem = {
@@ -109,6 +112,13 @@ export async function getReservationOptionInventoryDemand({
    * ResourceType y luego hacemos el
    * overlap exacto en memoria.
    */
+  /*
+   * Recuperamos únicamente campos escalares.
+   *
+   * Reservation, requisitos y assignments
+   * se consultan después mediante delegates
+   * raíz y de forma secuencial.
+   */
   const candidates =
     await db.reservationOption.findMany({
       where: {
@@ -143,52 +153,204 @@ export async function getReservationOptionInventoryDemand({
       },
 
       select: {
-        id: true,
+        id:
+          true,
 
-        includedQuantity: true,
-        optionalQuantity: true,
-        removedOptionalQuantity: true,
+        reservationId:
+          true,
 
-        startAt: true,
-        endAt: true,
+        serviceOptionId:
+          true,
 
-        reservation: {
-          select: {
-            id: true,
+        includedQuantity:
+          true,
 
-            startAt: true,
-            endAt: true,
-          },
-        },
+        optionalQuantity:
+          true,
 
-        serviceOption: {
-          select: {
-            resourceTypes: {
-              where: {
-                resourceTypeId,
-              },
+        removedOptionalQuantity:
+          true,
 
-              select: {
-                requiredQuantity:
-                  true,
-              },
+        startAt:
+          true,
+
+        endAt:
+          true,
+      },
+    });
+
+  const reservationIds = [
+    ...new Set(
+      candidates.map(
+        (option) =>
+          option.reservationId,
+      ),
+    ),
+  ];
+
+  const serviceOptionIds = [
+    ...new Set(
+      candidates.flatMap(
+        (option) =>
+          option.serviceOptionId
+            ? [option.serviceOptionId]
+            : [],
+      ),
+    ),
+  ];
+
+  const reservationOptionIds =
+    candidates.map(
+      (option) =>
+        option.id,
+    );
+
+  const reservations =
+    reservationIds.length > 0
+      ? await db.reservation.findMany({
+          where: {
+            id: {
+              in:
+                reservationIds,
             },
           },
-        },
 
-        resources: {
+          select: {
+            id:
+              true,
+
+            startAt:
+              true,
+
+            endAt:
+              true,
+          },
+
+          orderBy: {
+            id:
+              "asc",
+          },
+        })
+      : [];
+
+  const requirements =
+    serviceOptionIds.length > 0
+      ? await db.serviceOptionResourceType.findMany({
           where: {
+            serviceOptionId: {
+              in:
+                serviceOptionIds,
+            },
+
+            resourceTypeId,
+          },
+
+          select: {
+            serviceOptionId:
+              true,
+
+            requiredQuantity:
+              true,
+          },
+
+          orderBy: {
+            id:
+              "asc",
+          },
+        })
+      : [];
+
+  const assignments =
+    reservationOptionIds.length > 0
+      ? await db.reservationResource.findMany({
+          where: {
+            reservationOptionId: {
+              in:
+                reservationOptionIds,
+            },
+
             resource: {
               resourceTypeId,
             },
           },
 
           select: {
-            resourceId: true,
+            reservationOptionId:
+              true,
+
+            resourceId:
+              true,
           },
-        },
-      },
-    });
+
+          orderBy: {
+            id:
+              "asc",
+          },
+        })
+      : [];
+
+  const reservationById =
+    new Map<
+      string,
+      (typeof reservations)[number]
+    >();
+
+  for (
+    const reservation of
+    reservations
+  ) {
+    reservationById.set(
+      reservation.id,
+      reservation,
+    );
+  }
+
+  const requirementByServiceOptionId =
+    new Map<
+      string,
+      (typeof requirements)[number]
+    >();
+
+  for (
+    const requirement of
+    requirements
+  ) {
+    requirementByServiceOptionId.set(
+      requirement.serviceOptionId,
+      requirement,
+    );
+  }
+
+  const assignedIdsByReservationOptionId =
+    new Map<
+      string,
+      string[]
+    >();
+
+  for (
+    const assignment of
+    assignments
+  ) {
+    if (
+      !assignment.reservationOptionId
+    ) {
+      continue;
+    }
+
+    const current =
+      assignedIdsByReservationOptionId.get(
+        assignment.reservationOptionId,
+      ) ?? [];
+
+    current.push(
+      assignment.resourceId,
+    );
+
+    assignedIdsByReservationOptionId.set(
+      assignment.reservationOptionId,
+      current,
+    );
+  }
 
   const reservationOptions:
     ReservationOptionDemandItem[] =
@@ -204,17 +366,27 @@ export async function getReservationOptionInventoryDemand({
     0;
 
   for (
-    const option of candidates
+    const option of
+    candidates
   ) {
+    const reservation =
+      reservationById.get(
+        option.reservationId,
+      );
+
+    if (!reservation) {
+      throw new Error(
+        "RESERVATION_OPTION_RESERVATION_NOT_FOUND",
+      );
+    }
+
     const effectiveStartAt =
       option.startAt ??
-      option.reservation
-        .startAt;
+      reservation.startAt;
 
     const effectiveEndAt =
       option.endAt ??
-      option.reservation
-        .endAt;
+      reservation.endAt;
 
     if (
       effectiveEndAt <=
@@ -246,8 +418,11 @@ export async function getReservationOptionInventoryDemand({
      * un requisito de este tipo.
      */
     const requirement =
-      option.serviceOption
-        ?.resourceTypes[0];
+      option.serviceOptionId
+        ? requirementByServiceOptionId.get(
+            option.serviceOptionId,
+          )
+        : undefined;
 
     if (!requirement) {
       continue;
@@ -304,17 +479,13 @@ export async function getReservationOptionInventoryDemand({
       quantity *
       requiredQuantity;
 
-    const optionAssignedIds =
-      [
-        ...new Set(
-          option.resources.map(
-            (
-              resource,
-            ) =>
-              resource.resourceId,
-          ),
-        ),
-      ];
+    const optionAssignedIds = [
+      ...new Set(
+        assignedIdsByReservationOptionId.get(
+          option.id,
+        ) ?? [],
+      ),
+    ];
 
     const assignedResources =
       optionAssignedIds.length;
@@ -347,7 +518,7 @@ export async function getReservationOptionInventoryDemand({
         option.id,
 
       reservationId:
-        option.reservation.id,
+        reservation.id,
 
       startAt:
         effectiveStartAt,

@@ -25,8 +25,12 @@ export type BookingAvailabilityDb = Pick<
   typeof prisma,
   | "service"
   | "resource"
+  | "reservation"
   | "reservationService"
   | "reservationOption"
+  | "serviceResourceType"
+  | "serviceOptionResourceType"
+  | "reservationResource"
   | "block"
 >;
 

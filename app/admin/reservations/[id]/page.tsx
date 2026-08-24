@@ -724,6 +724,44 @@ type RescheduleResponse = {
   }>;
 };
 
+type StayExtensionResponse = {
+  success: true;
+
+  reservation: {
+    id: string;
+    confirmationCode: string;
+    status: string;
+    startAt: string;
+    endAt: string;
+    subtotal: number;
+    total: number;
+    paymentOption: string | null;
+  };
+
+  pricing: {
+    previousNights: number;
+    additionalNights: number;
+    nights: number;
+
+    additionalServiceSubtotal: number;
+    additionalOptionSubtotal: number;
+    additionalCharge: number;
+
+    newServiceSubtotal: number;
+    newOptionSubtotal: number;
+    newTotal: number;
+  };
+
+  resources: {
+    kept: unknown[];
+    unavailable: unknown[];
+  };
+
+  paymentSummary: {
+    balance: number;
+  };
+};
+
 type RegisterablePaymentMethod = "BANK_TRANSFER" | "CASH";
 
 type PaymentTargetStatus = "PAID" | "FAILED";
@@ -1270,6 +1308,23 @@ function getDateOnlyInTimezone(value: string, timezone: string) {
   return `${year}-${month}-${day}`;
 }
 
+function addDateOnlyDays(value: string, days: number) {
+  const [year, month, day] = value.split("-").map(Number);
+
+  const date = new Date(
+    Date.UTC(
+      year,
+      month - 1,
+      day + days,
+    ),
+  );
+
+  return [
+    String(date.getUTCFullYear()).padStart(4, "0"),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
 function formatDate(value: string, timezone: string) {
   return new Intl.DateTimeFormat("es-SV", {
     timeZone: timezone,
@@ -1327,6 +1382,33 @@ function getStatusLabel(status: string) {
   }
 }
 
+function getReservationChangeTypeLabel(type: string) {
+  switch (type) {
+    case "RESCHEDULE":
+      return "Reprogramación";
+
+    case "RESOURCE_CHANGE":
+      return "Cambio de recurso";
+
+    case "PRICE_ADJUSTMENT":
+      return "Ajuste de precio";
+
+    case "OPTION_ADDED":
+      return "Complemento agregado";
+
+    case "OPTION_REMOVED":
+      return "Complemento retirado";
+
+    case "STAY_EXTENSION":
+      return "Extensión de estancia";
+
+    case "MANUAL":
+      return "Cambio manual";
+
+    default:
+      return type.replaceAll("_", " ");
+  }
+}
 function getResourceAvailabilityLabel(availability: ResourceAvailability) {
   switch (availability) {
     case "AVAILABLE":
@@ -1839,6 +1921,23 @@ export default function ReservationDetailPage() {
   const [rescheduleResult, setRescheduleResult] =
     useState<RescheduleResponse | null>(null);
 
+  const [stayExtensionDialogOpen, setStayExtensionDialogOpen] =
+    useState(false);
+
+  const [stayExtensionCheckOut, setStayExtensionCheckOut] =
+    useState("");
+
+  const [stayExtensionReason, setStayExtensionReason] =
+    useState("");
+
+  const [stayExtensionSubmitting, setStayExtensionSubmitting] =
+    useState(false);
+
+  const [stayExtensionError, setStayExtensionError] =
+    useState<string | null>(null);
+
+  const [stayExtensionResult, setStayExtensionResult] =
+    useState<StayExtensionResponse | null>(null);
   const [optionDialogOpen, setOptionDialogOpen] = useState(false);
 
   const [postBookingOptions, setPostBookingOptions] =
@@ -2521,6 +2620,124 @@ export default function ReservationDetailPage() {
     }
   }
 
+  function openStayExtensionDialog() {
+    if (!data) {
+      return;
+    }
+
+    const currentCheckOut =
+      getDateOnlyInTimezone(
+        data.reservation.endAt,
+        data.business.timezone,
+      );
+
+    setStayExtensionError(null);
+    setStayExtensionResult(null);
+
+    setStayExtensionCheckOut(
+      addDateOnlyDays(
+        currentCheckOut,
+        1,
+      ),
+    );
+
+    setStayExtensionReason("");
+    setStayExtensionDialogOpen(true);
+  }
+
+  async function handleStayExtension() {
+    if (!data) {
+      return;
+    }
+
+    if (!stayExtensionCheckOut) {
+      setStayExtensionError(
+        "Debes indicar la nueva fecha de salida.",
+      );
+
+      return;
+    }
+
+    const currentCheckOut =
+      getDateOnlyInTimezone(
+        data.reservation.endAt,
+        data.business.timezone,
+      );
+
+    if (
+      stayExtensionCheckOut <=
+      currentCheckOut
+    ) {
+      setStayExtensionError(
+        "La nueva fecha de salida debe ser posterior a la salida actual.",
+      );
+
+      return;
+    }
+
+    setStayExtensionSubmitting(true);
+    setStayExtensionError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/extend`,
+        {
+          method: "PATCH",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            checkOut:
+              stayExtensionCheckOut,
+
+            changedById:
+              TEMP_RECEPTION_USER_ID,
+
+            reason:
+              stayExtensionReason.trim() ||
+              undefined,
+          }),
+        },
+      );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+          "string"
+            ? result.error
+            : "No fue posible extender la estancia",
+        );
+      }
+
+      const extensionResponse =
+        result as StayExtensionResponse;
+
+      setStayExtensionResult(
+        extensionResponse,
+      );
+
+      setStayExtensionDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setStayExtensionError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible extender la estancia",
+      );
+    } finally {
+      setStayExtensionSubmitting(
+        false,
+      );
+    }
+  }
   function getExistingOptionalQuantity(
     serviceOptionId: string,
   ) {
@@ -3497,6 +3714,24 @@ export default function ReservationDetailPage() {
     ["PENDING", "CONFIRMED"].includes(reservation.status) &&
     !financialState.hasRefundPending;
 
+  const showStayExtensionAction =
+    business.type.slug ===
+      "hotel" &&
+    reservation.status ===
+      "CHECKED_IN";
+
+  const canExtendStay =
+    showStayExtensionAction &&
+    !financialState.hasRefundPending;
+
+  const minimumStayExtensionCheckOut =
+    addDateOnlyDays(
+      getDateOnlyInTimezone(
+        reservation.endAt,
+        business.timezone,
+      ),
+      1,
+    );
   const pendingInitialPayment =
     data.payments.find(
       (payment) =>
@@ -3643,6 +3878,21 @@ export default function ReservationDetailPage() {
             Reprogramar
           </button>
 
+          {showStayExtensionAction && (
+            <button
+              type="button"
+              disabled={!canExtendStay}
+              title={
+                financialState.hasRefundPending
+                  ? "Debes resolver la devolución activa antes de extender la estancia."
+                  : undefined
+              }
+              onClick={openStayExtensionDialog}
+              className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Extender estancia
+            </button>
+          )}
           <button
             type="button"
             disabled={!canAssignResources}
@@ -3895,6 +4145,120 @@ export default function ReservationDetailPage() {
         </div>
       )}
 
+      {stayExtensionResult && (
+        <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
+          <p className="font-semibold">
+            Estancia extendida correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-green-700">
+                Nueva salida
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatDate(
+                  stayExtensionResult.reservation.endAt,
+                  business.timezone,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Noches agregadas
+              </p>
+
+              <p className="mt-1 font-medium">
+                {stayExtensionResult.pricing.additionalNights}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Cargo de habitación
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  stayExtensionResult.pricing
+                    .additionalServiceSubtotal,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Complementos heredados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  stayExtensionResult.pricing
+                    .additionalOptionSubtotal,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Cargo adicional
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  stayExtensionResult.pricing
+                    .additionalCharge,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Nuevo total
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  stayExtensionResult.pricing.newTotal,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Saldo pendiente
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  stayExtensionResult.paymentSummary.balance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Recursos conservados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {stayExtensionResult.resources.kept.length}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-green-800">
+            La reserva conserva su estado de check-in y sus recursos asignados.
+          </p>
+        </div>
+      )}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-xl border border-zinc-200 bg-white p-5">
           <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
@@ -4964,7 +5328,7 @@ export default function ReservationDetailPage() {
                     <div className="flex flex-col justify-between gap-2 sm:flex-row">
                       <div>
                         <p className="font-medium">
-                          {change.type.replaceAll("_", " ")}
+                          {getReservationChangeTypeLabel(change.type)}
                         </p>
 
                         {change.reason && (
@@ -5758,6 +6122,128 @@ export default function ReservationDetailPage() {
         </div>
       )}
 
+      {stayExtensionDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Extender estancia
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="rounded-lg bg-zinc-50 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                  Salida actual
+                </p>
+
+                <p className="mt-2 text-sm font-medium">
+                  {formatDate(
+                    reservation.endAt,
+                    business.timezone,
+                  )}
+
+                  {business.checkOutTime && (
+                    <>
+                      {" · "}
+                      Check-out {business.checkOutTime}
+                    </>
+                  )}
+                </p>
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Nueva fecha de salida
+                </span>
+
+                <input
+                  type="date"
+                  min={minimumStayExtensionCheckOut}
+                  value={stayExtensionCheckOut}
+                  onChange={(event) =>
+                    setStayExtensionCheckOut(
+                      event.target.value,
+                    )
+                  }
+                  className="h-10 rounded-lg border border-zinc-300 px-3"
+                />
+              </label>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo
+                </span>
+
+                <textarea
+                  rows={3}
+                  value={stayExtensionReason}
+                  onChange={(event) =>
+                    setStayExtensionReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Ej. el huésped solicitó una noche adicional"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                Solo se extenderá la fecha de salida. Se cobrarán las noches
+                adicionales con las tarifas vigentes y los complementos
+                heredados que dependan de la estancia. La reserva conservará su
+                estado de check-in y todos sus recursos asignados.
+              </div>
+
+              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm leading-6 text-zinc-600">
+                Si una habitación, complemento o recurso asignado no puede
+                mantenerse durante el tramo adicional, la operación será
+                rechazada sin modificar la reserva.
+              </div>
+
+              {stayExtensionError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {stayExtensionError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={stayExtensionSubmitting}
+                onClick={() => {
+                  setStayExtensionDialogOpen(false);
+                  setStayExtensionError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  stayExtensionSubmitting ||
+                  !stayExtensionCheckOut
+                }
+                onClick={() =>
+                  void handleStayExtension()
+                }
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
+              >
+                {stayExtensionSubmitting
+                  ? "Extendiendo..."
+                  : "Confirmar extensión"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {refundDialogOpen && selectedRefundGroup && refundTargetStatus && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-xl bg-white shadow-xl">

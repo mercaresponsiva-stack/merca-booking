@@ -1,4 +1,4 @@
-﻿import {
+import {
   getBlockedResourceIds,
   getOverlapWhere,
   isBusinessBlocked,
@@ -20,8 +20,12 @@ export type ResourceTypeInventoryDb =
   Pick<
     typeof prisma,
     | "resource"
+    | "reservation"
     | "reservationService"
     | "reservationOption"
+    | "serviceResourceType"
+    | "serviceOptionResourceType"
+    | "reservationResource"
     | "block"
   >;
 
@@ -136,12 +140,9 @@ export async function getResourceTypeInventoryState({
    * Demanda obligatoria originada por
    * ReservationService.
    *
-   * Deliberadamente NO filtramos por un
-   * Service concreto.
-   *
-   * Si varios Services consumen el mismo
-   * ResourceType, todos compiten por el
-   * mismo inventario físico.
+   * Los filtros permanecen en SQL.
+   * Requisitos y assignments se cargan
+   * mediante consultas raíz secuenciales.
    */
   const reservationServices =
     await db.reservationService.findMany({
@@ -182,40 +183,134 @@ export async function getResourceTypeInventoryState({
       },
 
       select: {
-        id: true,
+        id:
+          true,
+
+        serviceId:
+          true,
 
         quantity:
           true,
+      },
+    });
 
-        service: {
-          select: {
-            resourceTypes: {
-              where: {
-                resourceTypeId,
-              },
+  const reservationServiceIds =
+    reservationServices.map(
+      (reservationService) =>
+        reservationService.id,
+    );
 
-              select: {
-                requiredQuantity:
-                  true,
-              },
-            },
-          },
-        },
+  const serviceIds = [
+    ...new Set(
+      reservationServices.map(
+        (reservationService) =>
+          reservationService.serviceId,
+      ),
+    ),
+  ];
 
-        resources: {
+  const serviceRequirements =
+    serviceIds.length > 0
+      ? await db.serviceResourceType.findMany({
           where: {
+            serviceId: {
+              in:
+                serviceIds,
+            },
+
+            resourceTypeId,
+          },
+
+          select: {
+            serviceId:
+              true,
+
+            requiredQuantity:
+              true,
+          },
+
+          orderBy: {
+            id:
+              "asc",
+          },
+        })
+      : [];
+
+  const serviceAssignments =
+    reservationServiceIds.length > 0
+      ? await db.reservationResource.findMany({
+          where: {
+            reservationServiceId: {
+              in:
+                reservationServiceIds,
+            },
+
             resource: {
               resourceTypeId,
             },
           },
 
           select: {
+            reservationServiceId:
+              true,
+
             resourceId:
               true,
           },
-        },
-      },
-    });
+
+          orderBy: {
+            id:
+              "asc",
+          },
+        })
+      : [];
+
+  const requirementByServiceId =
+    new Map<
+      string,
+      (typeof serviceRequirements)[number]
+    >();
+
+  for (
+    const requirement of
+    serviceRequirements
+  ) {
+    requirementByServiceId.set(
+      requirement.serviceId,
+      requirement,
+    );
+  }
+
+  const assignedIdsByReservationServiceId =
+    new Map<
+      string,
+      string[]
+    >();
+
+  for (
+    const assignment of
+    serviceAssignments
+  ) {
+    if (
+      !assignment.reservationServiceId
+    ) {
+      continue;
+    }
+
+    const current =
+      assignedIdsByReservationServiceId.get(
+        assignment.reservationServiceId,
+      ) ?? [];
+
+    current.push(
+      assignment.resourceId,
+    );
+
+    assignedIdsByReservationServiceId.set(
+      assignment.reservationServiceId,
+      current,
+    );
+  }
 
   const serviceAssignedResourceIds =
     new Set<string>();
@@ -228,9 +323,9 @@ export async function getResourceTypeInventoryState({
     reservationServices
   ) {
     const requirement =
-      reservationService
-        .service
-        .resourceTypes[0];
+      requirementByServiceId.get(
+        reservationService.serviceId,
+      );
 
     if (!requirement) {
       continue;
@@ -251,14 +346,9 @@ export async function getResourceTypeInventoryState({
 
     const assignedIds = [
       ...new Set(
-        reservationService
-          .resources
-          .map(
-            (
-              assignment,
-            ) =>
-              assignment.resourceId,
-          ),
+        assignedIdsByReservationServiceId.get(
+          reservationService.id,
+        ) ?? [],
       ),
     ];
 
