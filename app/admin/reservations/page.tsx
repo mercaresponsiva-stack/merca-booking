@@ -1,8 +1,9 @@
-﻿"use client";
+"use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
+import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
 import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 const RESERVATION_STATUSES = [
@@ -158,6 +159,17 @@ function getStatusLabel(status: ReservationStatus) {
 }
 
 export default function ReservationsPage() {
+  const [operationalNow, setOperationalNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const intervalId = window.setInterval(
+      () => setOperationalNow(Date.now()),
+      60_000,
+    );
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
 
   const [appliedFilters, setAppliedFilters] = useState<Filters>(EMPTY_FILTERS);
@@ -231,7 +243,18 @@ export default function ReservationsPage() {
   }, [appliedFilters, page, pageSize]);
 
   useEffect(() => {
-    void loadReservations();
+    const timeoutId = window.setTimeout(
+      () => {
+        void loadReservations();
+      },
+      0,
+    );
+
+    return () => {
+      window.clearTimeout(
+        timeoutId,
+      );
+    };
   }, [loadReservations]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -517,6 +540,16 @@ export default function ReservationsPage() {
                         <span className="inline-flex rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium">
                           {getStatusLabel(reservation.status)}
                         </span>
+
+                        {isReservationCheckoutDue({
+                          status: reservation.status,
+                          endAt: reservation.endAt,
+                          now: operationalNow,
+                        }) && (
+                          <p className="mt-1 text-xs font-medium text-amber-700">
+                            Salida pendiente
+                          </p>
+                        )}
                       </td>
 
                       <td className="px-5 py-4 font-medium whitespace-nowrap">

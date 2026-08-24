@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { zonedDateTimeToUtc } from "@/lib/booking/datetime";
+import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
 
 type AdminUser = {
   id: string;
@@ -1770,6 +1771,17 @@ function getReservationResourceRequirements(
 }
 
 export default function ReservationDetailPage() {
+  const [operationalNow, setOperationalNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const intervalId = window.setInterval(
+      () => setOperationalNow(Date.now()),
+      60_000,
+    );
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
   const params = useParams<{
     id: string;
   }>();
@@ -3525,6 +3537,16 @@ export default function ReservationDetailPage() {
     ? STATUS_TRANSITIONS[reservation.status]
     : [];
 
+  const checkoutDue = isReservationCheckoutDue({
+    status: reservation.status,
+    endAt: reservation.endAt,
+    now: operationalNow,
+  });
+
+  const statusActionLabel = checkoutDue
+    ? "Registrar check-out"
+    : "Cambiar estado";
+
   const canRemoveOptions = [
     "PENDING",
     "CONFIRMED",
@@ -3589,6 +3611,12 @@ export default function ReservationDetailPage() {
             <span className="rounded-full bg-zinc-200 px-3 py-1 text-xs font-medium">
               {getStatusLabel(reservation.status)}
             </span>
+
+            {checkoutDue && (
+              <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">
+                Salida pendiente
+              </span>
+            )}
           </div>
 
           <p className="mt-2 text-sm text-zinc-500">
@@ -3637,7 +3665,7 @@ export default function ReservationDetailPage() {
             }}
             className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Cambiar estado
+            {statusActionLabel}
           </button>
 
           <button
@@ -3945,6 +3973,13 @@ export default function ReservationDetailPage() {
                 {business.checkOutTime && (
                   <p className="mt-1 text-sm text-zinc-500">
                     Check-out {business.checkOutTime}
+                  </p>
+                )}
+
+                {checkoutDue && (
+                  <p className="mt-2 text-sm font-medium text-amber-700">
+                    La salida programada ya venció. Confirma el check-out
+                    cuando el huésped haya salido.
                   </p>
                 )}
               </div>
