@@ -9,7 +9,12 @@ import { prisma } from "@/lib/prisma";
 
 export type ResourceIntervalCheckDb = Pick<
   typeof prisma,
-  "reservationResource" | "block"
+  | "reservationResource"
+  | "reservation"
+  | "reservationOption"
+  | "reservationService"
+  | "resource"
+  | "block"
 >;
 
 export type ResourceIntervalUnavailableReason =
@@ -181,6 +186,15 @@ export async function checkResourceForInterval({
    * tener un intervalo propio distinto al de
    * su Reservation.
    */
+  /*
+   * Las relaciones se cargan mediante
+   * consultas escalares secuenciales.
+   *
+   * Esto evita que Prisma adapter-pg
+   * ejecute varias consultas de relación
+   * simultáneamente sobre el mismo Client
+   * de una transacción interactiva.
+   */
   const assignmentCandidates =
     await db.reservationResource.findMany({
       where: {
@@ -190,20 +204,49 @@ export async function checkResourceForInterval({
           not:
             reservationId,
         },
-
-        reservation: {
-          businessId,
-
-          status: {
-            in: [
-              ...ACTIVE_RESERVATION_STATUSES,
-            ],
-          },
-        },
       },
 
       select: {
-        reservation: {
+        reservationId:
+          true,
+
+        reservationOptionId:
+          true,
+      },
+    });
+
+  const candidateReservationIds =
+    [
+      ...new Set(
+        assignmentCandidates.map(
+          (
+            assignment,
+          ) =>
+            assignment.reservationId,
+        ),
+      ),
+    ];
+
+  const candidateReservations =
+    candidateReservationIds.length ===
+    0
+      ? []
+      : await db.reservation.findMany({
+          where: {
+            id: {
+              in:
+                candidateReservationIds,
+            },
+
+            businessId,
+
+            status: {
+              in: [
+                ...ACTIVE_RESERVATION_STATUSES,
+              ],
+            },
+          },
+
           select: {
             id:
               true,
@@ -217,73 +260,166 @@ export async function checkResourceForInterval({
             endAt:
               true,
           },
-        },
+        });
 
-        reservationOption: {
+  const candidateReservationsById =
+    new Map<
+      string,
+      (typeof candidateReservations)[number]
+    >();
+
+  for (
+    const reservation of
+    candidateReservations
+  ) {
+    candidateReservationsById.set(
+      reservation.id,
+      reservation,
+    );
+  }
+
+  const relevantAssignmentCandidates =
+    assignmentCandidates.filter(
+      (
+        assignment,
+      ) =>
+        candidateReservationsById.has(
+          assignment.reservationId,
+        ),
+    );
+
+  const candidateOptionIds =
+    new Set<string>();
+
+  for (
+    const assignment of
+    relevantAssignmentCandidates
+  ) {
+    if (
+      assignment.reservationOptionId
+    ) {
+      candidateOptionIds.add(
+        assignment.reservationOptionId,
+      );
+    }
+  }
+
+  const candidateOptions =
+    candidateOptionIds.size ===
+    0
+      ? []
+      : await db.reservationOption.findMany({
+          where: {
+            id: {
+              in: [
+                ...candidateOptionIds,
+              ],
+            },
+          },
+
           select: {
+            id:
+              true,
+
             startAt:
               true,
 
             endAt:
               true,
           },
-        },
-      },
-    });
+        });
 
-  const overlappingAssignment =
-    assignmentCandidates.find(
-      (
-        assignment,
-      ) => {
-        const effectiveInterval =
-          resolveAssignedResourceEffectiveInterval({
-            reservationStartAt:
-              assignment
-                .reservation
-                .startAt,
+  const candidateOptionsById =
+    new Map<
+      string,
+      (typeof candidateOptions)[number]
+    >();
 
-            reservationEndAt:
-              assignment
-                .reservation
-                .endAt,
-
-            optionStartAt:
-              assignment
-                .reservationOption
-                ?.startAt ??
-              null,
-
-            optionEndAt:
-              assignment
-                .reservationOption
-                ?.endAt ??
-              null,
-          });
-
-        return intervalsOverlap(
-          effectiveInterval
-            .startAt,
-
-          effectiveInterval
-            .endAt,
-
-          startAt,
-          endAt,
-        );
-      },
+  for (
+    const option of
+    candidateOptions
+  ) {
+    candidateOptionsById.set(
+      option.id,
+      option,
     );
+  }
 
-  if (overlappingAssignment) {
+  let overlappingReservation:
+    | (typeof candidateReservations)[number]
+    | null =
+    null;
+
+  for (
+    const assignment of
+    relevantAssignmentCandidates
+  ) {
+    const candidateReservation =
+      candidateReservationsById.get(
+        assignment.reservationId,
+      );
+
+    if (
+      !candidateReservation
+    ) {
+      continue;
+    }
+
+    const candidateOption =
+      assignment.reservationOptionId
+        ? candidateOptionsById.get(
+            assignment.reservationOptionId,
+          ) ??
+          null
+        : null;
+
+    const effectiveInterval =
+      resolveAssignedResourceEffectiveInterval({
+        reservationStartAt:
+          candidateReservation.startAt,
+
+        reservationEndAt:
+          candidateReservation.endAt,
+
+        optionStartAt:
+          candidateOption?.startAt ??
+          null,
+
+        optionEndAt:
+          candidateOption?.endAt ??
+          null,
+      });
+
+    if (
+      intervalsOverlap(
+        effectiveInterval.startAt,
+        effectiveInterval.endAt,
+        startAt,
+        endAt,
+      )
+    ) {
+      overlappingReservation =
+        candidateReservation;
+
+      break;
+    }
+  }
+
+  if (
+    overlappingReservation
+  ) {
     return {
       available: false,
 
-      reason: "RESOURCE_ALREADY_OCCUPIED",
+      reason:
+        "RESOURCE_ALREADY_OCCUPIED",
 
       conflictReservation: {
-        id: overlappingAssignment.reservation.id,
+        id:
+          overlappingReservation.id,
 
-        confirmationCode: overlappingAssignment.reservation.confirmationCode,
+        confirmationCode:
+          overlappingReservation.confirmationCode,
       },
     };
   }
@@ -409,64 +545,273 @@ export async function evaluateAssignedResourcesForInterval({
   endAt,
   db = prisma,
 }: EvaluateAssignedResourcesInput) {
-  const assignments = await db.reservationResource.findMany({
-    where: {
-      reservationId,
-    },
-
-    select: {
-      id: true,
-
-      resourceId: true,
-
-      reservationService: {
-        select: {
-          serviceId: true,
-        },
+  /*
+   * Primero recuperamos únicamente las
+   * llaves persistidas de cada asignación.
+   *
+   * Después cargamos Resource,
+   * ReservationOption y ReservationService
+   * mediante consultas escalares esperadas
+   * secuencialmente.
+   */
+  const assignments =
+    await db.reservationResource.findMany({
+      where: {
+        reservationId,
       },
 
-      reservationOption: {
-        select: {
-          startAt: true,
+      select: {
+        id:
+          true,
 
-          endAt: true,
+        resourceId:
+          true,
 
-          reservationService: {
-            select: {
-              serviceId: true,
+        reservationServiceId:
+          true,
+
+        reservationOptionId:
+          true,
+      },
+    });
+
+  const resourceIds =
+    [
+      ...new Set(
+        assignments.map(
+          (
+            assignment,
+          ) =>
+            assignment.resourceId,
+        ),
+      ),
+    ];
+
+  const resources =
+    resourceIds.length ===
+    0
+      ? []
+      : await db.resource.findMany({
+          where: {
+            id: {
+              in:
+                resourceIds,
             },
           },
-        },
-      },
 
-      resource: {
-        select: {
-          id: true,
+          select: {
+            id:
+              true,
 
-          isActive: true,
+            isActive:
+              true,
 
-          resourceTypeId: true,
-        },
-      },
-    },
-  });
+            resourceTypeId:
+              true,
+          },
+        });
 
-  const results: AssignedResourceDisposition[] = [];
+  const resourcesById =
+    new Map<
+      string,
+      (typeof resources)[number]
+    >();
 
-  for (const assignment of assignments) {
+  for (
+    const resource of
+    resources
+  ) {
+    resourcesById.set(
+      resource.id,
+      resource,
+    );
+  }
+
+  const reservationOptionIds =
+    new Set<string>();
+
+  for (
+    const assignment of
+    assignments
+  ) {
+    if (
+      assignment.reservationOptionId
+    ) {
+      reservationOptionIds.add(
+        assignment.reservationOptionId,
+      );
+    }
+  }
+
+  const reservationOptions =
+    reservationOptionIds.size ===
+    0
+      ? []
+      : await db.reservationOption.findMany({
+          where: {
+            id: {
+              in: [
+                ...reservationOptionIds,
+              ],
+            },
+          },
+
+          select: {
+            id:
+              true,
+
+            reservationServiceId:
+              true,
+
+            startAt:
+              true,
+
+            endAt:
+              true,
+          },
+        });
+
+  const reservationOptionsById =
+    new Map<
+      string,
+      (typeof reservationOptions)[number]
+    >();
+
+  for (
+    const reservationOption of
+    reservationOptions
+  ) {
+    reservationOptionsById.set(
+      reservationOption.id,
+      reservationOption,
+    );
+  }
+
+  const reservationServiceIds =
+    new Set<string>();
+
+  for (
+    const assignment of
+    assignments
+  ) {
+    if (
+      assignment.reservationServiceId
+    ) {
+      reservationServiceIds.add(
+        assignment.reservationServiceId,
+      );
+    }
+  }
+
+  for (
+    const reservationOption of
+    reservationOptions
+  ) {
+    if (
+      reservationOption.reservationServiceId
+    ) {
+      reservationServiceIds.add(
+        reservationOption.reservationServiceId,
+      );
+    }
+  }
+
+  const reservationServices =
+    reservationServiceIds.size ===
+    0
+      ? []
+      : await db.reservationService.findMany({
+          where: {
+            id: {
+              in: [
+                ...reservationServiceIds,
+              ],
+            },
+          },
+
+          select: {
+            id:
+              true,
+
+            serviceId:
+              true,
+          },
+        });
+
+  const reservationServicesById =
+    new Map<
+      string,
+      (typeof reservationServices)[number]
+    >();
+
+  for (
+    const reservationService of
+    reservationServices
+  ) {
+    reservationServicesById.set(
+      reservationService.id,
+      reservationService,
+    );
+  }
+
+  const results:
+    AssignedResourceDisposition[] =
+    [];
+
+  for (
+    const assignment of
+    assignments
+  ) {
+    const resource =
+      resourcesById.get(
+        assignment.resourceId,
+      );
+
+    if (
+      !resource
+    ) {
+      throw new Error(
+        "RESERVATION_RESOURCE_RESOURCE_NOT_FOUND",
+      );
+    }
+
+    const reservationOption =
+      assignment.reservationOptionId
+        ? reservationOptionsById.get(
+            assignment.reservationOptionId,
+          ) ??
+          null
+        : null;
+
+    const directServiceId =
+      assignment.reservationServiceId
+        ? reservationServicesById.get(
+            assignment.reservationServiceId,
+          )
+            ?.serviceId ??
+          null
+        : null;
+
     const optionReservationServiceId =
-      assignment.reservationOption
-        ?.reservationService
-        ?.serviceId ??
+      reservationOption
+        ?.reservationServiceId ??
       null;
 
+    const optionServiceId =
+      optionReservationServiceId
+        ? reservationServicesById.get(
+            optionReservationServiceId,
+          )
+            ?.serviceId ??
+          null
+        : null;
+
     const serviceId =
-      assignment.reservationService
-        ?.serviceId ??
-      optionReservationServiceId;
+      directServiceId ??
+      optionServiceId;
 
     const resourceTypeId =
-      assignment.resource.resourceTypeId ??
+      resource.resourceTypeId ??
       null;
 
     /*
@@ -490,14 +835,12 @@ export async function evaluateAssignedResourcesForInterval({
           endAt,
 
         optionStartAt:
-          assignment
-            .reservationOption
+          reservationOption
             ?.startAt ??
           null,
 
         optionEndAt:
-          assignment
-            .reservationOption
+          reservationOption
             ?.endAt ??
           null,
       });
@@ -506,19 +849,25 @@ export async function evaluateAssignedResourcesForInterval({
     // INACTIVE RESOURCE
     // ───────────────────────────────────────────
 
-    if (!assignment.resource.isActive) {
+    if (
+      !resource.isActive
+    ) {
       results.push({
-        action: "RELEASE",
+        action:
+          "RELEASE",
 
-        assignmentId: assignment.id,
+        assignmentId:
+          assignment.id,
 
-        resourceId: assignment.resourceId,
+        resourceId:
+          assignment.resourceId,
 
         serviceId,
 
         resourceTypeId,
 
-        reason: "RESOURCE_INACTIVE",
+        reason:
+          "RESOURCE_INACTIVE",
       });
 
       continue;
@@ -528,19 +877,26 @@ export async function evaluateAssignedResourcesForInterval({
     // RESOURCE TYPE REQUIRED
     // ───────────────────────────────────────────
 
-    if (!resourceTypeId) {
+    if (
+      !resourceTypeId
+    ) {
       results.push({
-        action: "RELEASE",
+        action:
+          "RELEASE",
 
-        assignmentId: assignment.id,
+        assignmentId:
+          assignment.id,
 
-        resourceId: assignment.resourceId,
+        resourceId:
+          assignment.resourceId,
 
         serviceId,
 
-        resourceTypeId: null,
+        resourceTypeId:
+          null,
 
-        reason: "RESOURCE_TYPE_NOT_CONFIGURED",
+        reason:
+          "RESOURCE_TYPE_NOT_CONFIGURED",
       });
 
       continue;
@@ -556,19 +912,26 @@ export async function evaluateAssignedResourcesForInterval({
     // pertenece.
     // ───────────────────────────────────────────
 
-    if (!serviceId) {
+    if (
+      !serviceId
+    ) {
       results.push({
-        action: "RELEASE",
+        action:
+          "RELEASE",
 
-        assignmentId: assignment.id,
+        assignmentId:
+          assignment.id,
 
-        resourceId: assignment.resourceId,
+        resourceId:
+          assignment.resourceId,
 
-        serviceId: null,
+        serviceId:
+          null,
 
         resourceTypeId,
 
-        reason: "RESERVATION_SERVICE_NOT_LINKED",
+        reason:
+          "RESERVATION_SERVICE_NOT_LINKED",
       });
 
       continue;
@@ -578,45 +941,52 @@ export async function evaluateAssignedResourcesForInterval({
     // NEW INTERVAL
     // ───────────────────────────────────────────
 
-    const availability = await checkResourceForInterval({
-      businessId,
+    const availability =
+      await checkResourceForInterval({
+        businessId,
 
-      reservationId,
-
-      serviceId,
-
-      resourceTypeId,
-
-      resourceId: assignment.resourceId,
-
-      startAt:
-        assignmentInterval
-          .startAt,
-
-      endAt:
-        assignmentInterval
-          .endAt,
-
-      db,
-    });
-
-    if (!availability.available) {
-      results.push({
-        action: "RELEASE",
-
-        assignmentId: assignment.id,
-
-        resourceId: assignment.resourceId,
+        reservationId,
 
         serviceId,
 
         resourceTypeId,
 
-        reason: availability.reason,
+        resourceId:
+          assignment.resourceId,
+
+        startAt:
+          assignmentInterval.startAt,
+
+        endAt:
+          assignmentInterval.endAt,
+
+        db,
+      });
+
+    if (
+      !availability.available
+    ) {
+      results.push({
+        action:
+          "RELEASE",
+
+        assignmentId:
+          assignment.id,
+
+        resourceId:
+          assignment.resourceId,
+
+        serviceId,
+
+        resourceTypeId,
+
+        reason:
+          availability.reason,
 
         ...(availability.conflictReservation
           ? {
-              conflictReservation: availability.conflictReservation,
+              conflictReservation:
+                availability.conflictReservation,
             }
           : {}),
       });
@@ -625,11 +995,14 @@ export async function evaluateAssignedResourcesForInterval({
     }
 
     results.push({
-      action: "KEEP",
+      action:
+        "KEEP",
 
-      assignmentId: assignment.id,
+      assignmentId:
+        assignment.id,
 
-      resourceId: assignment.resourceId,
+      resourceId:
+        assignment.resourceId,
 
       serviceId,
 
@@ -638,24 +1011,46 @@ export async function evaluateAssignedResourcesForInterval({
   }
 
   return {
-    assignments: results,
+    assignments:
+      results,
 
-    keep: results.filter(
-      (
-        result,
-      ): result is Extract<AssignedResourceDisposition, { action: "KEEP" }> =>
-        result.action === "KEEP",
-    ),
+    keep:
+      results.filter(
+        (
+          result,
+        ): result is Extract<
+          AssignedResourceDisposition,
+          {
+            action:
+              "KEEP";
+          }
+        > =>
+          result.action ===
+          "KEEP",
+      ),
 
-    release: results.filter(
-      (
-        result,
-      ): result is Extract<
-        AssignedResourceDisposition,
-        { action: "RELEASE" }
-      > => result.action === "RELEASE",
-    ),
+    release:
+      results.filter(
+        (
+          result,
+        ): result is Extract<
+          AssignedResourceDisposition,
+          {
+            action:
+              "RELEASE";
+          }
+        > =>
+          result.action ===
+          "RELEASE",
+      ),
 
-    canKeepAll: results.every((result) => result.action === "KEEP"),
+    canKeepAll:
+      results.every(
+        (
+          result,
+        ) =>
+          result.action ===
+          "KEEP",
+      ),
   };
 }
