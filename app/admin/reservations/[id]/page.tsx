@@ -833,6 +833,45 @@ type CheckoutResponse = {
   };
 };
 
+type CompletionResponse = {
+  success: true;
+
+  reservation:
+    CheckoutResponse[
+      "reservation"
+    ];
+
+  actor:
+    CheckoutResponse[
+      "actor"
+    ];
+
+  completion: {
+    completedAt: string;
+    financiallySettled: boolean;
+  };
+
+  change:
+    CheckoutResponse[
+      "change"
+    ];
+
+  resources:
+    CheckoutResponse[
+      "resources"
+    ];
+
+  paymentSummary:
+    CheckoutResponse[
+      "paymentSummary"
+    ];
+
+  financialState:
+    CheckoutResponse[
+      "financialState"
+    ];
+};
+
 type RegisterablePaymentMethod = "BANK_TRANSFER" | "CASH";
 
 type PaymentTargetStatus = "PAID" | "FAILED";
@@ -1344,7 +1383,7 @@ const STATUS_TRANSITIONS: Record<
 
   CHECKED_IN: [],
 
-  CHECKED_OUT: ["COMPLETED"],
+  CHECKED_OUT: [],
 
   COMPLETED: [],
 };
@@ -1475,6 +1514,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "CHECK_OUT":
       return "Check-out";
+
+    case "COMPLETION":
+      return "Cierre administrativo";
 
     case "MANUAL":
       return "Cambio manual";
@@ -2026,6 +2068,21 @@ export default function ReservationDetailPage() {
 
   const [checkoutResult, setCheckoutResult] =
     useState<CheckoutResponse | null>(null);
+
+  const [completionDialogOpen, setCompletionDialogOpen] =
+    useState(false);
+
+  const [completionReason, setCompletionReason] =
+    useState("");
+
+  const [completionSubmitting, setCompletionSubmitting] =
+    useState(false);
+
+  const [completionError, setCompletionError] =
+    useState<string | null>(null);
+
+  const [completionResult, setCompletionResult] =
+    useState<CompletionResponse | null>(null);
 
   const [optionDialogOpen, setOptionDialogOpen] = useState(false);
 
@@ -2926,6 +2983,109 @@ export default function ReservationDetailPage() {
       );
     } finally {
       setCheckoutSubmitting(
+        false,
+      );
+    }
+  }
+
+  function openCompletionDialog() {
+    if (!data) {
+      return;
+    }
+
+    setCompletionReason("");
+    setCompletionError(null);
+    setCompletionResult(null);
+
+    setCheckoutResult(null);
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    setCompletionDialogOpen(true);
+  }
+
+  async function handleCompletion() {
+    if (!data) {
+      return;
+    }
+
+    if (
+      !completionFinanciallySettled
+    ) {
+      setCompletionError(
+        "No puedes completar la reserva hasta resolver saldos, pagos pendientes, devoluciones pendientes o sobrepagos.",
+      );
+
+      return;
+    }
+
+    if (
+      completionReason.trim().length >
+      1000
+    ) {
+      setCompletionError(
+        "El motivo del cierre no puede superar los 1000 caracteres.",
+      );
+
+      return;
+    }
+
+    setCompletionSubmitting(true);
+    setCompletionError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/complete`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            changedById:
+              TEMP_RECEPTION_USER_ID,
+
+            reason:
+              completionReason.trim() ||
+              undefined,
+          }),
+        },
+      );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+          "string"
+            ? result.error
+            : "No fue posible completar la reserva",
+        );
+      }
+
+      const completionResponse =
+        result as CompletionResponse;
+
+      setCompletionResult(
+        completionResponse,
+      );
+
+      setCompletionDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setCompletionError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible completar la reserva",
+      );
+    } finally {
+      setCompletionSubmitting(
         false,
       );
     }
@@ -3977,6 +4137,10 @@ export default function ReservationDetailPage() {
     reservation.status ===
       "CHECKED_IN";
 
+  const showCompletionAction =
+    reservation.status ===
+    "CHECKED_OUT";
+
   const checkoutBlockedByPendingPayment =
     paymentSummary.pending >
     0;
@@ -4146,6 +4310,21 @@ export default function ReservationDetailPage() {
               className="h-10 rounded-lg border border-amber-300 bg-amber-50 px-4 text-sm font-medium text-amber-900"
             >
               Registrar check-out
+            </button>
+          )}
+
+          {showCompletionAction && (
+            <button
+              type="button"
+              title={
+                completionFinanciallySettled
+                  ? "Esta acción cerrará administrativamente la reserva."
+                  : "Debes resolver saldos, pagos pendientes, devoluciones pendientes o sobrepagos antes de completar la reserva."
+              }
+              onClick={openCompletionDialog}
+              className="h-10 rounded-lg border border-green-300 bg-green-50 px-4 text-sm font-medium text-green-900"
+            >
+              Completar reserva
             </button>
           )}
 
@@ -4513,6 +4692,127 @@ export default function ReservationDetailPage() {
             <p className="mt-2 text-amber-800">
               La salida fue registrada, pero la reserva no podrá marcarse como
               completada hasta resolver la devolución pendiente.
+            </p>
+          )}
+        </div>
+      )}
+
+      {completionResult && (
+        <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
+          <p className="font-semibold">
+            Reserva completada correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-green-700">
+                Cierre registrado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {new Intl.DateTimeFormat(
+                  "es-SV",
+                  {
+                    dateStyle:
+                      "medium",
+
+                    timeStyle:
+                      "short",
+
+                    timeZone:
+                      business.timezone,
+                  },
+                ).format(
+                  new Date(
+                    completionResult.completion.completedAt,
+                  ),
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Estado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(
+                  completionResult.reservation.status,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Total contractual
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  completionResult.paymentSummary.total,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Pago neto
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  completionResult.paymentSummary.netPaid,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Saldo pendiente
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  completionResult.paymentSummary.balance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Registrado por
+              </p>
+
+              <p className="mt-1 font-medium">
+                {completionResult.actor.name}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Asignaciones históricas
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  completionResult.resources
+                    .assignmentCount
+                }
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-green-800">
+            La reserva quedó cerrada administrativamente. Sus fechas, precios,
+            pagos, devoluciones y asignaciones históricas permanecen sin cambios.
+          </p>
+
+          {completionResult.change.reason && (
+            <p className="mt-2 text-green-800">
+              Motivo: {completionResult.change.reason}
             </p>
           )}
         </div>
@@ -6109,6 +6409,171 @@ export default function ReservationDetailPage() {
         </div>
       )}
 
+      {completionDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Completar reserva
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Reserva {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 rounded-lg bg-zinc-50 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-500">
+                    Estado actual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {getStatusLabel(
+                      reservation.status,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Total contractual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.total,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago neto
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.netPaid,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Saldo pendiente
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.balance,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pagos pendientes
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.pending,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Devoluciones pendientes
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.refundPending,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {completionFinanciallySettled ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                  Esta acción cerrará administrativamente la reserva. Las fechas,
+                  precios, pagos, devoluciones y asignaciones históricas
+                  permanecerán sin cambios.
+                </div>
+              ) : (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
+                  No puedes completar la reserva hasta resolver saldos, pagos
+                  pendientes, devoluciones pendientes o sobrepagos.
+                </div>
+              )}
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo (opcional)
+                </span>
+
+                <textarea
+                  rows={3}
+                  maxLength={1000}
+                  value={completionReason}
+                  onChange={(event) =>
+                    setCompletionReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Ej. cierre administrativo verificado por recepción"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              {completionError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {completionError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={completionSubmitting}
+                onClick={() => {
+                  setCompletionDialogOpen(false);
+                  setCompletionError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  completionSubmitting ||
+                  !completionFinanciallySettled
+                }
+                onClick={() =>
+                  void handleCompletion()
+                }
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {completionSubmitting
+                  ? "Completando..."
+                  : "Confirmar cierre"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {statusDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
@@ -6164,19 +6629,7 @@ export default function ReservationDetailPage() {
                 </div>
               )}
 
-              {targetStatus === "COMPLETED" && (
-                <div
-                  className={`mt-4 rounded-lg border p-3 text-sm ${
-                    completionFinanciallySettled
-                      ? "border-amber-200 bg-amber-50 text-amber-800"
-                      : "border-red-200 bg-red-50 text-red-700"
-                  }`}
-                >
-                  {completionFinanciallySettled
-                    ? "Esta acción cerrará administrativamente la reserva."
-                    : "No puedes completar la reserva hasta resolver saldos, pagos pendientes, devoluciones pendientes o sobrepagos."}
-                </div>
-              )}
+
 
               {statusError && (
                 <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
@@ -6202,10 +6655,7 @@ export default function ReservationDetailPage() {
                 type="button"
                 disabled={
                   !targetStatus ||
-                  statusSubmitting ||
-                  (targetStatus ===
-                    "COMPLETED" &&
-                    !completionFinanciallySettled)
+                  statusSubmitting
                 }
                 onClick={() => void handleStatusChange()}
                 className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
