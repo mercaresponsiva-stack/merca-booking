@@ -1055,6 +1055,7 @@ enum RefundStatus {
 enum ReservationChangeType {
   RESCHEDULE
   STAY_EXTENSION
+  CHECK_IN
   CHECK_OUT
   COMPLETION
   RESOURCE_CHANGE

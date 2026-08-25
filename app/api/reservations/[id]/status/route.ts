@@ -1,9 +1,6 @@
 import { getReservationTransitionPolicyViolation } from "@/lib/booking/reservation-policy";
 
 import {
-  evaluateAssignedResourcesForInterval,
-} from "@/lib/booking/resource-interval-check";
-import {
   isReservationStatus,
   isReservationTransitionAllowed,
 } from "@/lib/booking/reservation-state";
@@ -36,6 +33,38 @@ export async function PATCH(
         },
         {
           status: 400,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // CHECK-IN DEDICADO
+    //
+    // CHECKED_IN registra actor, hora real,
+    // auditoría, pago inicial y recursos.
+    //
+    // Por eso nunca debe aplicarse mediante
+    // el cambio genérico de estado.
+    // ─────────────────────────────────────────────
+
+    if (
+      status ===
+      "CHECKED_IN"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "CHECK_IN_REQUIRES_DEDICATED_OPERATION",
+
+          error:
+            "El check-in debe registrarse mediante la operación dedicada de ingreso.",
+        },
+        {
+          status:
+            409,
         },
       );
     }
@@ -517,103 +546,7 @@ export async function PATCH(
         }
 
         // ───────────────────────────────────────
-        // 9. CHECK-IN: ASSIGNED RESOURCE INTEGRITY
-        //
-        // La cantidad contractual ya fue validada.
-        //
-        // Ahora comprobamos que cada Resource
-        // asignado todavía pueda utilizarse:
-        //
-        // - sigue activo
-        // - conserva ResourceType
-        // - mantiene vínculo con Service
-        // - no tiene conflicto con otra reserva
-        // - no fue bloqueado posteriormente
-        //
-        // Esta operación NO libera assignments.
-        // ───────────────────────────────────────
-
-        if (
-          status ===
-          "CHECKED_IN"
-        ) {
-          const resourceEvaluation =
-            await evaluateAssignedResourcesForInterval({
-              businessId:
-                reservation.businessId,
-
-              reservationId:
-                reservation.id,
-
-              startAt:
-                reservation.startAt,
-
-              endAt:
-                reservation.endAt,
-
-              db:
-                tx,
-            });
-
-          if (
-            !resourceEvaluation
-              .canKeepAll
-          ) {
-            /*
-             * Conservamos diagnóstico operativo
-             * en el servidor, pero no modificamos
-             * inventario durante el check-in.
-             */
-            console.warn(
-              "CHECK-IN assigned resource integrity violation:",
-              {
-                reservationId:
-                  reservation.id,
-
-                unavailableAssignments:
-                  resourceEvaluation
-                    .release
-                    .map(
-                      (
-                        assignment,
-                      ) => ({
-                        assignmentId:
-                          assignment
-                            .assignmentId,
-
-                        resourceId:
-                          assignment
-                            .resourceId,
-
-                        serviceId:
-                          assignment
-                            .serviceId,
-
-                        resourceTypeId:
-                          assignment
-                            .resourceTypeId,
-
-                        reason:
-                          assignment
-                            .reason,
-
-                        conflictReservation:
-                          assignment
-                            .conflictReservation ??
-                          null,
-                      }),
-                    ),
-              },
-            );
-
-            throw new Error(
-              "ASSIGNED_RESOURCES_UNAVAILABLE_FOR_CHECK_IN",
-            );
-          }
-        }
-
-        // ───────────────────────────────────────
-        // 10. UPDATE STATUS
+        // 9. UPDATE STATUS
         // ───────────────────────────────────────
 
         const updatedReservation = await tx.reservation.update({
@@ -658,7 +591,7 @@ export async function PATCH(
     );
 
     // ─────────────────────────────────────────────
-    // 11. RESPONSE
+    // 10. RESPONSE
     // ─────────────────────────────────────────────
 
     return NextResponse.json({
@@ -787,99 +720,6 @@ export async function PATCH(
         },
         {
           status: 409,
-        },
-      );
-    }
-
-    // ─────────────────────────────────────────────
-    // PAYMENT REQUIRED FOR CHECK-IN
-    // ─────────────────────────────────────────────
-
-    if (
-      error instanceof Error &&
-      error.message === "INITIAL_PAYMENT_REQUIRED_FOR_CHECK_IN"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "No se puede realizar el check-in porque el pago inicial requerido no está cubierto",
-        },
-        {
-          status: 409,
-        },
-      );
-    }
-
-    // ─────────────────────────────────────────────
-    // RESOURCE REQUIRED FOR CHECK-IN
-    // ─────────────────────────────────────────────
-
-    if (
-      error instanceof Error &&
-      error.message === "RESOURCES_REQUIRED_FOR_CHECK_IN"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "No se puede realizar el check-in hasta asignar todos los recursos físicos requeridos por la reserva",
-        },
-        {
-          status: 409,
-        },
-      );
-    }
-
-    // ─────────────────────────────────────────────
-    // OPTION RESOURCE REQUIRED FOR CHECK-IN
-    // ─────────────────────────────────────────────
-
-    if (
-      error instanceof Error &&
-      error.message === "OPTION_RESOURCES_REQUIRED_FOR_CHECK_IN"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "No se puede realizar el check-in hasta asignar todos los recursos físicos requeridos por los complementos activos",
-        },
-        {
-          status: 409,
-        },
-      );
-    }
-
-    // ─────────────────────────────────────────────
-    // ASSIGNED RESOURCE UNAVAILABLE FOR CHECK-IN
-    // ─────────────────────────────────────────────
-
-    if (
-      error instanceof Error &&
-      (
-        error.message ===
-          "ASSIGNED_RESOURCES_UNAVAILABLE_FOR_CHECK_IN" ||
-        error.message ===
-          "RESERVATION_OPTION_INTERVAL_INCOMPLETE" ||
-        error.message ===
-          "INVALID_RESERVATION_RESOURCE_EFFECTIVE_INTERVAL"
-      )
-    ) {
-      return NextResponse.json(
-        {
-          success:
-            false,
-
-          code:
-            "ASSIGNED_RESOURCES_UNAVAILABLE_FOR_CHECK_IN",
-
-          error:
-            "No se puede realizar el check-in porque uno o más recursos asignados ya no están disponibles. Revisa o reasigna los recursos de la reserva.",
-        },
-        {
-          status:
-            409,
         },
       );
     }

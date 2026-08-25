@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { zonedDateTimeToUtc } from "@/lib/booking/datetime";
 import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
+import { isReservationCheckinDue } from "@/lib/booking/reservation-checkin-policy";
 
 type AdminUser = {
   id: string;
@@ -833,6 +834,63 @@ type CheckoutResponse = {
   };
 };
 
+type CheckinResponse = {
+  success: true;
+
+  reservation:
+    CheckoutResponse[
+      "reservation"
+    ];
+
+  actor:
+    CheckoutResponse[
+      "actor"
+    ];
+
+  checkin: {
+    timing:
+      | "EARLY"
+      | "ON_TIME"
+      | "LATE";
+
+    scheduledStartAt: string;
+    scheduledEndAt: string;
+    checkedInAt: string;
+
+    earlyCheckin: boolean;
+  };
+
+  change:
+    CheckoutResponse[
+      "change"
+    ];
+
+  resources: {
+    retained: Array<{
+      id: string;
+      reservationServiceId: string | null;
+      reservationOptionId: string | null;
+      resourceId: string;
+    }>;
+
+    assignmentCount: number;
+    integrityValidated: boolean;
+    validationStartAt: string;
+    validationEndAt: string;
+    earlyIntervalExpanded: boolean;
+  };
+
+  paymentSummary:
+    CheckoutResponse[
+      "paymentSummary"
+    ];
+
+  financialState:
+    CheckoutResponse[
+      "financialState"
+    ];
+};
+
 type CompletionResponse = {
   success: true;
 
@@ -1375,7 +1433,7 @@ const STATUS_TRANSITIONS: Record<
 > = {
   PENDING: ["CONFIRMED"],
 
-  CONFIRMED: ["CHECKED_IN", "NO_SHOW"],
+  CONFIRMED: ["NO_SHOW"],
 
   CANCELLED: [],
 
@@ -1511,6 +1569,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "STAY_EXTENSION":
       return "Extensión de estancia";
+
+    case "CHECK_IN":
+      return "Check-in";
 
     case "CHECK_OUT":
       return "Check-out";
@@ -2054,6 +2115,21 @@ export default function ReservationDetailPage() {
 
   const [stayExtensionResult, setStayExtensionResult] =
     useState<StayExtensionResponse | null>(null);
+  const [checkinDialogOpen, setCheckinDialogOpen] =
+    useState(false);
+
+  const [checkinReason, setCheckinReason] =
+    useState("");
+
+  const [checkinSubmitting, setCheckinSubmitting] =
+    useState(false);
+
+  const [checkinError, setCheckinError] =
+    useState<string | null>(null);
+
+  const [checkinResult, setCheckinResult] =
+    useState<CheckinResponse | null>(null);
+
   const [checkoutDialogOpen, setCheckoutDialogOpen] =
     useState(false);
 
@@ -2884,6 +2960,129 @@ export default function ReservationDetailPage() {
       );
     }
   }
+  function openCheckinDialog() {
+    if (!data) {
+      return;
+    }
+
+    setCheckinReason("");
+    setCheckinError(null);
+    setCheckinResult(null);
+
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    setCheckinDialogOpen(true);
+  }
+
+  async function handleCheckin() {
+    if (!data) {
+      return;
+    }
+
+    if (
+      checkinWindowClosed
+    ) {
+      setCheckinError(
+        "La salida programada ya venció. Debes gestionar la reserva como no presentada.",
+      );
+
+      return;
+    }
+
+    if (
+      checkinBlockedByInitialPayment
+    ) {
+      setCheckinError(
+        "El pago inicial requerido debe estar cubierto antes del check-in.",
+      );
+
+      return;
+    }
+
+    if (
+      !checkinDue &&
+      !checkinReason.trim()
+    ) {
+      setCheckinError(
+        "Debes indicar el motivo del ingreso anticipado.",
+      );
+
+      return;
+    }
+
+    if (
+      checkinReason.trim().length >
+      1000
+    ) {
+      setCheckinError(
+        "El motivo del check-in no puede superar los 1000 caracteres.",
+      );
+
+      return;
+    }
+
+    setCheckinSubmitting(true);
+    setCheckinError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/checkin`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            changedById:
+              TEMP_RECEPTION_USER_ID,
+
+            reason:
+              checkinReason.trim() ||
+              undefined,
+          }),
+        },
+      );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+          "string"
+            ? result.error
+            : "No fue posible registrar el check-in",
+        );
+      }
+
+      const checkinResponse =
+        result as CheckinResponse;
+
+      setCheckinResult(
+        checkinResponse,
+      );
+
+      setCheckinDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setCheckinError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible registrar el check-in",
+      );
+    } finally {
+      setCheckinSubmitting(
+        false,
+      );
+    }
+  }
+
   function openCheckoutDialog() {
     if (!data) {
       return;
@@ -4125,6 +4324,53 @@ export default function ReservationDetailPage() {
     ? STATUS_TRANSITIONS[reservation.status]
     : [];
 
+  const checkinDue =
+    isReservationCheckinDue({
+      status:
+        isOperationalStatus(
+          reservation.status,
+        )
+          ? reservation.status
+          : "PENDING",
+
+      startAt:
+        new Date(
+          reservation.startAt,
+        ),
+
+      now:
+        new Date(
+          operationalNow,
+        ),
+    });
+
+  const reservationEndTimestamp =
+    new Date(
+      reservation.endAt,
+    ).getTime();
+
+  const checkinWindowClosed =
+    Number.isFinite(
+      reservationEndTimestamp,
+    ) &&
+    operationalNow >=
+      reservationEndTimestamp;
+
+  const showCheckinAction =
+    business.type.slug ===
+      "hotel" &&
+    reservation.status ===
+      "CONFIRMED";
+
+  const checkinBlockedByInitialPayment =
+    !paymentSummary
+      .initialPaymentSatisfied;
+
+  const checkinIsEarly =
+    showCheckinAction &&
+    !checkinDue &&
+    !checkinWindowClosed;
+
   const checkoutDue = isReservationCheckoutDue({
     status: reservation.status,
     endAt: reservation.endAt,
@@ -4239,6 +4485,14 @@ export default function ReservationDetailPage() {
               {getStatusLabel(reservation.status)}
             </span>
 
+            {showCheckinAction &&
+              checkinDue &&
+              !checkinWindowClosed && (
+                <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-800">
+                  Ingreso pendiente
+                </span>
+              )}
+
             {checkoutDue && (
               <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">
                 Salida pendiente
@@ -4293,6 +4547,25 @@ export default function ReservationDetailPage() {
           >
             {resourceActionLabel}
           </button>
+
+          {showCheckinAction && (
+            <button
+              type="button"
+              title={
+                checkinWindowClosed
+                  ? "La salida programada ya venció. Debes gestionar la reserva como no presentada."
+                  : checkinBlockedByInitialPayment
+                    ? "Debes cubrir el pago inicial antes del check-in."
+                    : checkinIsEarly
+                      ? "Esta acción registrará un ingreso anticipado."
+                      : "Registrar el ingreso del huésped."
+              }
+              onClick={openCheckinDialog}
+              className="h-10 rounded-lg border border-blue-300 bg-blue-50 px-4 text-sm font-medium text-blue-900"
+            >
+              Registrar check-in
+            </button>
+          )}
 
           {showCheckoutAction && (
             <button
@@ -4570,6 +4843,125 @@ export default function ReservationDetailPage() {
             <p className="mt-3 text-amber-800">
               Uno o más recursos asignados fueron liberados porque no podían
               mantenerse en las nuevas fechas.
+            </p>
+          )}
+        </div>
+      )}
+
+      {checkinResult && (
+        <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
+          <p className="font-semibold">
+            Check-in registrado correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-green-700">
+                Hora registrada
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatDateTime(
+                  checkinResult.checkin.checkedInAt,
+                  business.timezone,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Tipo de ingreso
+              </p>
+
+              <p className="mt-1 font-medium">
+                {checkinResult.checkin.timing ===
+                "EARLY"
+                  ? "Anticipado"
+                  : checkinResult.checkin.timing ===
+                      "ON_TIME"
+                    ? "A la hora programada"
+                    : "Posterior a la hora programada"}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Estado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(
+                  checkinResult.reservation.status,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Recursos validados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  checkinResult.resources
+                    .assignmentCount
+                }
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Total contractual
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  checkinResult.paymentSummary.total,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Saldo pendiente
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  checkinResult.paymentSummary.balance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Registrado por
+              </p>
+
+              <p className="mt-1 font-medium">
+                {checkinResult.actor.name}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-green-800">
+            Las fechas, los precios y las asignaciones contractuales permanecen
+            sin cambios. Los recursos continuarán consumiendo inventario durante
+            la estancia.
+          </p>
+
+          {checkinResult.resources.earlyIntervalExpanded && (
+            <p className="mt-2 text-amber-800">
+              La disponibilidad física también fue validada desde la hora real
+              del ingreso anticipado.
+            </p>
+          )}
+
+          {checkinResult.change.reason && (
+            <p className="mt-2 text-green-800">
+              Motivo: {checkinResult.change.reason}
             </p>
           )}
         </div>
@@ -6243,6 +6635,175 @@ export default function ReservationDetailPage() {
           )}
         </div>
       </div>
+      {checkinDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Registrar check-in
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Reserva {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 rounded-lg bg-zinc-50 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-500">
+                    Entrada programada
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.startAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Salida programada
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.endAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago inicial requerido
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {paymentSummary.requiredInitialPayment ===
+                    null
+                      ? "No definido"
+                      : formatMoney(
+                          paymentSummary.requiredInitialPayment,
+                          business.currency,
+                        )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago inicial pendiente
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.initialPaymentRemaining ??
+                        0,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {checkinWindowClosed && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
+                  La salida programada ya venció. No puede registrarse check-in;
+                  debes gestionar la reserva como no presentada.
+                </div>
+              )}
+
+              {checkinIsEarly && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                  Este será un ingreso anticipado. Las fechas y el total
+                  contractual permanecerán sin cambios, se ampliará la
+                  validación física desde la hora real y debes registrar el
+                  motivo.
+                </div>
+              )}
+
+              {checkinBlockedByInitialPayment && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  Debes cubrir el pago inicial requerido antes de registrar el
+                  check-in.
+                </div>
+              )}
+
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-800">
+                Al confirmar se volverán a validar todos los recursos físicos
+                obligatorios de la reserva y sus complementos activos.
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo
+                  {checkinIsEarly
+                    ? " (obligatorio)"
+                    : " (opcional)"}
+                </span>
+
+                <textarea
+                  rows={3}
+                  maxLength={1000}
+                  value={checkinReason}
+                  onChange={(event) =>
+                    setCheckinReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder={
+                    checkinIsEarly
+                      ? "Ej. habitación disponible para ingreso anticipado"
+                      : "Ej. ingreso verificado por recepción"
+                  }
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              {checkinError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {checkinError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={checkinSubmitting}
+                onClick={() => {
+                  setCheckinDialogOpen(false);
+                  setCheckinError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  checkinSubmitting ||
+                  checkinWindowClosed ||
+                  checkinBlockedByInitialPayment ||
+                  (checkinIsEarly &&
+                    !checkinReason.trim())
+                }
+                onClick={() =>
+                  void handleCheckin()
+                }
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {checkinSubmitting
+                  ? "Registrando..."
+                  : "Confirmar check-in"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {checkoutDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
@@ -6616,12 +7177,6 @@ export default function ReservationDetailPage() {
                 </select>
               </label>
 
-              {targetStatus === "CHECKED_IN" && (
-                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                  El check-in requiere que el pago inicial esté cubierto y todos
-                  los recursos físicos requeridos estén asignados.
-                </div>
-              )}
 
               {targetStatus === "NO_SHOW" && (
                 <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
