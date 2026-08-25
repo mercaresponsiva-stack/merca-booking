@@ -1,4 +1,8 @@
 import { getReservationTransitionPolicyViolation } from "@/lib/booking/reservation-policy";
+
+import {
+  validateReservationForCompletion,
+} from "@/lib/booking/reservation-checkout-policy";
 import {
   evaluateAssignedResourcesForInterval,
 } from "@/lib/booking/resource-interval-check";
@@ -35,6 +39,38 @@ export async function PATCH(
         },
         {
           status: 400,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // CHECK-OUT DEDICADO
+    //
+    // CHECKED_OUT libera inventario operativo
+    // y deshabilita la recepción de pagos.
+    //
+    // Por eso nunca debe aplicarse mediante
+    // el cambio genérico de estado.
+    // ─────────────────────────────────────────────
+
+    if (
+      status ===
+      "CHECKED_OUT"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "CHECK_OUT_REQUIRES_DEDICATED_OPERATION",
+
+          error:
+            "El check-out debe registrarse mediante la operación dedicada de salida.",
+        },
+        {
+          status:
+            409,
         },
       );
     }
@@ -431,7 +467,33 @@ export async function PATCH(
         });
 
         // ───────────────────────────────────────
-        // 7. PENDING → CONFIRMED
+        // 7. CHECKED_OUT → COMPLETED
+        //
+        // COMPLETED representa el cierre
+        // administrativo definitivo.
+        //
+        // No se permite mientras exista:
+        //
+        // - saldo contractual
+        // - pago pendiente
+        // - devolución pendiente
+        // - sobrepago sin resolver
+        // ───────────────────────────────────────
+
+        if (
+          status ===
+          "COMPLETED"
+        ) {
+          validateReservationForCompletion({
+            status:
+              reservation.status,
+
+            paymentSummary,
+          });
+        }
+
+        // ───────────────────────────────────────
+        // 8. TRANSITION POLICY
         //
         // No confirmamos una reserva nueva
         // sin haber recibido el pago inicial
@@ -451,7 +513,7 @@ export async function PATCH(
         }
 
         // ───────────────────────────────────────
-        // 8. CHECK-IN: ASSIGNED RESOURCE INTEGRITY
+        // 9. CHECK-IN: ASSIGNED RESOURCE INTEGRITY
         //
         // La cantidad contractual ya fue validada.
         //
@@ -810,6 +872,56 @@ export async function PATCH(
 
           error:
             "No se puede realizar el check-in porque uno o más recursos asignados ya no están disponibles. Revisa o reasigna los recursos de la reserva.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // COMPLETION FINANCIAL SETTLEMENT
+    // ─────────────────────────────────────────────
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "RESERVATION_FINANCIAL_SETTLEMENT_REQUIRED_FOR_COMPLETION"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "RESERVATION_FINANCIAL_SETTLEMENT_REQUIRED_FOR_COMPLETION",
+
+          error:
+            "La reserva no puede completarse hasta resolver saldos, pagos pendientes, devoluciones pendientes o sobrepagos.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "RESERVATION_NOT_ELIGIBLE_FOR_COMPLETION"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "RESERVATION_NOT_ELIGIBLE_FOR_COMPLETION",
+
+          error:
+            "Solo una reserva con check-out registrado puede marcarse como completada.",
         },
         {
           status:

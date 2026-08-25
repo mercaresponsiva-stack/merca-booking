@@ -762,6 +762,77 @@ type StayExtensionResponse = {
   };
 };
 
+type CheckoutResponse = {
+  success: true;
+
+  reservation: {
+    id: string;
+    confirmationCode: string;
+    status: string;
+    startAt: string;
+    endAt: string;
+    subtotal: number;
+    total: number;
+    paymentOption: string | null;
+  };
+
+  actor: {
+    id: string;
+    name: string;
+    role: string;
+  };
+
+  checkout: {
+    timing:
+      | "EARLY"
+      | "ON_TIME"
+      | "LATE";
+
+    scheduledEndAt: string;
+    checkedOutAt: string;
+
+    earlyCheckout: boolean;
+    hasRefundPending: boolean;
+  };
+
+  change: {
+    id: string;
+    type: string;
+    changedById: string | null;
+    reason: string | null;
+    createdAt: string;
+  };
+
+  resources: {
+    retained: Array<{
+      id: string;
+      reservationServiceId: string | null;
+      reservationOptionId: string | null;
+      resourceId: string;
+    }>;
+
+    assignmentCount: number;
+    inventoryReleasedByStatus: boolean;
+  };
+
+  paymentSummary: {
+    total: number;
+    pending: number;
+    refundPending: number;
+    netPaid: number;
+    balance: number;
+  };
+
+  financialState: {
+    contractualBalance: number;
+    amountDue: number;
+    paymentAcceptanceAllowedByStatus: boolean;
+    canAcceptPayment: boolean;
+    hasRefundPending: boolean;
+    isCancelled: boolean;
+  };
+};
+
 type RegisterablePaymentMethod = "BANK_TRANSFER" | "CASH";
 
 type PaymentTargetStatus = "PAID" | "FAILED";
@@ -1271,7 +1342,7 @@ const STATUS_TRANSITIONS: Record<
 
   NO_SHOW: [],
 
-  CHECKED_IN: ["CHECKED_OUT"],
+  CHECKED_IN: [],
 
   CHECKED_OUT: ["COMPLETED"],
 
@@ -1401,6 +1472,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "STAY_EXTENSION":
       return "Extensión de estancia";
+
+    case "CHECK_OUT":
+      return "Check-out";
 
     case "MANUAL":
       return "Cambio manual";
@@ -1938,6 +2012,21 @@ export default function ReservationDetailPage() {
 
   const [stayExtensionResult, setStayExtensionResult] =
     useState<StayExtensionResponse | null>(null);
+  const [checkoutDialogOpen, setCheckoutDialogOpen] =
+    useState(false);
+
+  const [checkoutReason, setCheckoutReason] =
+    useState("");
+
+  const [checkoutSubmitting, setCheckoutSubmitting] =
+    useState(false);
+
+  const [checkoutError, setCheckoutError] =
+    useState<string | null>(null);
+
+  const [checkoutResult, setCheckoutResult] =
+    useState<CheckoutResponse | null>(null);
+
   const [optionDialogOpen, setOptionDialogOpen] = useState(false);
 
   const [postBookingOptions, setPostBookingOptions] =
@@ -2738,6 +2827,110 @@ export default function ReservationDetailPage() {
       );
     }
   }
+  function openCheckoutDialog() {
+    if (!data) {
+      return;
+    }
+
+    setCheckoutReason("");
+    setCheckoutError(null);
+    setCheckoutResult(null);
+
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    setCheckoutDialogOpen(true);
+  }
+
+  async function handleCheckout() {
+    if (!data) {
+      return;
+    }
+
+    const isEarlyCheckout =
+      !isReservationCheckoutDue({
+        status:
+          data.reservation.status,
+
+        endAt:
+          data.reservation.endAt,
+
+        now:
+          new Date(),
+      });
+
+    if (
+      isEarlyCheckout &&
+      !checkoutReason.trim()
+    ) {
+      setCheckoutError(
+        "Debes indicar el motivo de la salida anticipada.",
+      );
+
+      return;
+    }
+
+    setCheckoutSubmitting(true);
+    setCheckoutError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/checkout`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            changedById:
+              TEMP_RECEPTION_USER_ID,
+
+            reason:
+              checkoutReason.trim() ||
+              undefined,
+          }),
+        },
+      );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+            "string"
+            ? result.error
+            : "No fue posible registrar el check-out",
+        );
+      }
+
+      const checkoutResponse =
+        result as CheckoutResponse;
+
+      setCheckoutResult(
+        checkoutResponse,
+      );
+
+      setCheckoutDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible registrar el check-out",
+      );
+    } finally {
+      setCheckoutSubmitting(
+        false,
+      );
+    }
+  }
+
   function getExistingOptionalQuantity(
     serviceOptionId: string,
   ) {
@@ -3778,9 +3971,44 @@ export default function ReservationDetailPage() {
     now: operationalNow,
   });
 
-  const statusActionLabel = checkoutDue
-    ? "Registrar check-out"
-    : "Cambiar estado";
+  const showCheckoutAction =
+    business.type.slug ===
+      "hotel" &&
+    reservation.status ===
+      "CHECKED_IN";
+
+  const checkoutBlockedByPendingPayment =
+    paymentSummary.pending >
+    0;
+
+  const checkoutBlockedByBalance =
+    paymentSummary.balance >
+    0;
+
+  const completionFinanciallySettled =
+    Math.round(
+      paymentSummary.balance *
+        100,
+    ) ===
+      0 &&
+    Math.round(
+      paymentSummary.pending *
+        100,
+    ) ===
+      0 &&
+    Math.round(
+      paymentSummary.refundPending *
+        100,
+    ) ===
+      0 &&
+    Math.round(
+      paymentSummary.netPaid *
+        100,
+    ) ===
+      Math.round(
+        paymentSummary.total *
+          100,
+      );
 
   const canRemoveOptions = [
     "PENDING",
@@ -3902,21 +4130,44 @@ export default function ReservationDetailPage() {
             {resourceActionLabel}
           </button>
 
-          <button
-            type="button"
-            disabled={availableStatusTransitions.length === 0}
-            onClick={() => {
-              setStatusError(null);
-              setStatusSuccess(null);
+          {showCheckoutAction && (
+            <button
+              type="button"
+              title={
+                checkoutBlockedByPendingPayment
+                  ? "Debes resolver los pagos pendientes antes del check-out."
+                  : checkoutBlockedByBalance
+                    ? "Debes cobrar el saldo pendiente antes del check-out."
+                    : !checkoutDue
+                      ? "Esta acción registrará una salida anticipada."
+                      : undefined
+              }
+              onClick={openCheckoutDialog}
+              className="h-10 rounded-lg border border-amber-300 bg-amber-50 px-4 text-sm font-medium text-amber-900"
+            >
+              Registrar check-out
+            </button>
+          )}
 
-              setTargetStatus(availableStatusTransitions[0] ?? "");
+          {availableStatusTransitions.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatusError(null);
+                setStatusSuccess(null);
 
-              setStatusDialogOpen(true);
-            }}
-            className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {statusActionLabel}
-          </button>
+                setTargetStatus(
+                  availableStatusTransitions[0] ??
+                    "",
+                );
+
+                setStatusDialogOpen(true);
+              }}
+              className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium"
+            >
+              Cambiar estado
+            </button>
+          )}
 
           <button
             type="button"
@@ -4140,6 +4391,128 @@ export default function ReservationDetailPage() {
             <p className="mt-3 text-amber-800">
               Uno o más recursos asignados fueron liberados porque no podían
               mantenerse en las nuevas fechas.
+            </p>
+          )}
+        </div>
+      )}
+
+      {checkoutResult && (
+        <div className="mt-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-900">
+          <p className="font-semibold">
+            Check-out registrado correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-green-700">
+                Hora registrada
+              </p>
+
+              <p className="mt-1 font-medium">
+                {new Intl.DateTimeFormat(
+                  "es-SV",
+                  {
+                    dateStyle:
+                      "medium",
+
+                    timeStyle:
+                      "short",
+
+                    timeZone:
+                      business.timezone,
+                  },
+                ).format(
+                  new Date(
+                    checkoutResult.checkout.checkedOutAt,
+                  ),
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Tipo de salida
+              </p>
+
+              <p className="mt-1 font-medium">
+                {checkoutResult.checkout.timing ===
+                "EARLY"
+                  ? "Anticipada"
+                  : checkoutResult.checkout.timing ===
+                      "ON_TIME"
+                    ? "A la hora programada"
+                    : "Posterior a la hora programada"}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Estado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(
+                  checkoutResult.reservation.status,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Recursos liberados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  checkoutResult.resources
+                    .assignmentCount
+                }
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Total contractual
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  checkoutResult.paymentSummary.total,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-green-700">
+                Saldo pendiente
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  checkoutResult.paymentSummary.balance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-green-800">
+            Las asignaciones físicas permanecen en el historial, pero ya no
+            consumen inventario operativo.
+          </p>
+
+          {checkoutResult.checkout.earlyCheckout && (
+            <p className="mt-2 text-amber-800">
+              La salida anticipada no modificó las fechas ni el total
+              contractual de la reserva.
+            </p>
+          )}
+
+          {checkoutResult.checkout.hasRefundPending && (
+            <p className="mt-2 text-amber-800">
+              La salida fue registrada, pero la reserva no podrá marcarse como
+              completada hasta resolver la devolución pendiente.
             </p>
           )}
         </div>
@@ -5570,6 +5943,172 @@ export default function ReservationDetailPage() {
           )}
         </div>
       </div>
+      {checkoutDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Registrar check-out
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Reserva {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 rounded-lg bg-zinc-50 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-500">
+                    Salida programada
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDate(
+                      reservation.endAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Total contractual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.total,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Saldo pendiente
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.balance,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pagos pendientes
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.pending,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {!checkoutDue && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                  Esta será una salida anticipada. Las fechas y el total
+                  contractual permanecerán sin cambios, y debes registrar el
+                  motivo.
+                </div>
+              )}
+
+              {checkoutBlockedByPendingPayment && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  Debes confirmar, rechazar o resolver los pagos pendientes
+                  antes de registrar el check-out.
+                </div>
+              )}
+
+              {checkoutBlockedByBalance && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  Debes cobrar el saldo pendiente antes de registrar el
+                  check-out.
+                </div>
+              )}
+
+              {paymentSummary.refundPending > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  Existe una devolución pendiente. No impide la salida física,
+                  pero deberá resolverse antes de completar administrativamente
+                  la reserva.
+                </div>
+              )}
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo
+                  {!checkoutDue
+                    ? " (obligatorio)"
+                    : " (opcional)"}
+                </span>
+
+                <textarea
+                  rows={3}
+                  value={checkoutReason}
+                  onChange={(event) =>
+                    setCheckoutReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder={
+                    checkoutDue
+                      ? "Ej. salida confirmada por recepción"
+                      : "Ej. huésped solicita salida anticipada"
+                  }
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              {checkoutError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {checkoutError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={checkoutSubmitting}
+                onClick={() => {
+                  setCheckoutDialogOpen(false);
+                  setCheckoutError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  checkoutSubmitting ||
+                  checkoutBlockedByPendingPayment ||
+                  checkoutBlockedByBalance ||
+                  (!checkoutDue &&
+                    !checkoutReason.trim())
+                }
+                onClick={() =>
+                  void handleCheckout()
+                }
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {checkoutSubmitting
+                  ? "Registrando..."
+                  : "Confirmar check-out"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {statusDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
@@ -5625,6 +6164,20 @@ export default function ReservationDetailPage() {
                 </div>
               )}
 
+              {targetStatus === "COMPLETED" && (
+                <div
+                  className={`mt-4 rounded-lg border p-3 text-sm ${
+                    completionFinanciallySettled
+                      ? "border-amber-200 bg-amber-50 text-amber-800"
+                      : "border-red-200 bg-red-50 text-red-700"
+                  }`}
+                >
+                  {completionFinanciallySettled
+                    ? "Esta acción cerrará administrativamente la reserva."
+                    : "No puedes completar la reserva hasta resolver saldos, pagos pendientes, devoluciones pendientes o sobrepagos."}
+                </div>
+              )}
+
               {statusError && (
                 <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
                   {statusError}
@@ -5647,7 +6200,13 @@ export default function ReservationDetailPage() {
 
               <button
                 type="button"
-                disabled={!targetStatus || statusSubmitting}
+                disabled={
+                  !targetStatus ||
+                  statusSubmitting ||
+                  (targetStatus ===
+                    "COMPLETED" &&
+                    !completionFinanciallySettled)
+                }
                 onClick={() => void handleStatusChange()}
                 className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
               >
