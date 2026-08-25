@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { zonedDateTimeToUtc } from "@/lib/booking/datetime";
 import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
 import { isReservationCheckinDue } from "@/lib/booking/reservation-checkin-policy";
+import { isReservationNoShowDue } from "@/lib/booking/reservation-no-show-policy";
 
 type AdminUser = {
   id: string;
@@ -891,6 +892,48 @@ type CheckinResponse = {
     ];
 };
 
+type NoShowResponse = {
+  success: true;
+
+  reservation:
+    CheckoutResponse[
+      "reservation"
+    ];
+
+  actor:
+    CheckoutResponse[
+      "actor"
+    ];
+
+  noShow: {
+    vertical: string;
+    scheduledStartAt: string;
+    scheduledEndAt: string;
+    markedNoShowAt: string;
+    pendingPaymentsResolved: boolean;
+  };
+
+  change:
+    CheckoutResponse[
+      "change"
+    ];
+
+  resources:
+    CheckoutResponse[
+      "resources"
+    ];
+
+  paymentSummary:
+    CheckoutResponse[
+      "paymentSummary"
+    ];
+
+  financialState:
+    CheckoutResponse[
+      "financialState"
+    ];
+};
+
 type CompletionResponse = {
   success: true;
 
@@ -1433,7 +1476,7 @@ const STATUS_TRANSITIONS: Record<
 > = {
   PENDING: ["CONFIRMED"],
 
-  CONFIRMED: ["NO_SHOW"],
+  CONFIRMED: [],
 
   CANCELLED: [],
 
@@ -1572,6 +1615,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "CHECK_IN":
       return "Check-in";
+
+    case "NO_SHOW":
+      return "No se presentó";
 
     case "CHECK_OUT":
       return "Check-out";
@@ -2129,6 +2175,21 @@ export default function ReservationDetailPage() {
 
   const [checkinResult, setCheckinResult] =
     useState<CheckinResponse | null>(null);
+
+  const [noShowDialogOpen, setNoShowDialogOpen] =
+    useState(false);
+
+  const [noShowReason, setNoShowReason] =
+    useState("");
+
+  const [noShowSubmitting, setNoShowSubmitting] =
+    useState(false);
+
+  const [noShowError, setNoShowError] =
+    useState<string | null>(null);
+
+  const [noShowResult, setNoShowResult] =
+    useState<NoShowResponse | null>(null);
 
   const [checkoutDialogOpen, setCheckoutDialogOpen] =
     useState(false);
@@ -3078,6 +3139,130 @@ export default function ReservationDetailPage() {
       );
     } finally {
       setCheckinSubmitting(
+        false,
+      );
+    }
+  }
+
+  function openNoShowDialog() {
+    if (!data) {
+      return;
+    }
+
+    setNoShowReason("");
+    setNoShowError(null);
+    setNoShowResult(null);
+
+    setStatusError(null);
+    setStatusSuccess(null);
+
+    setNoShowDialogOpen(true);
+  }
+
+  async function handleNoShow() {
+    if (!data) {
+      return;
+    }
+
+    if (
+      !noShowDue
+    ) {
+      setNoShowError(
+        "La reserva todavía no ha alcanzado su hora programada de inicio.",
+      );
+
+      return;
+    }
+
+    if (
+      noShowBlockedByPendingPayment
+    ) {
+      setNoShowError(
+        "Debes confirmar o rechazar los pagos pendientes antes de registrar la ausencia.",
+      );
+
+      return;
+    }
+
+    const normalizedReason =
+      noShowReason.trim();
+
+    if (
+      !normalizedReason
+    ) {
+      setNoShowError(
+        "Debes indicar el motivo por el que se marca la reserva como no presentada.",
+      );
+
+      return;
+    }
+
+    if (
+      normalizedReason.length >
+      1000
+    ) {
+      setNoShowError(
+        "El motivo de la ausencia no puede superar los 1000 caracteres.",
+      );
+
+      return;
+    }
+
+    setNoShowSubmitting(true);
+    setNoShowError(null);
+
+    try {
+      const response = await fetch(
+        `/api/reservations/${reservationId}/no-show`,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            changedById:
+              TEMP_RECEPTION_USER_ID,
+
+            reason:
+              normalizedReason,
+          }),
+        },
+      );
+
+      const result =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error ===
+          "string"
+            ? result.error
+            : "No fue posible registrar la ausencia",
+        );
+      }
+
+      const noShowResponse =
+        result as NoShowResponse;
+
+      setNoShowResult(
+        noShowResponse,
+      );
+
+      setNoShowDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (error) {
+      setNoShowError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible registrar la ausencia",
+      );
+    } finally {
+      setNoShowSubmitting(
         false,
       );
     }
@@ -4371,6 +4556,37 @@ export default function ReservationDetailPage() {
     !checkinDue &&
     !checkinWindowClosed;
 
+  const noShowDue =
+    isReservationNoShowDue({
+      status:
+        isOperationalStatus(
+          reservation.status,
+        )
+          ? reservation.status
+          : "PENDING",
+
+      scheduledStartAt:
+        new Date(
+          reservation.startAt,
+        ),
+
+      now:
+        new Date(
+          operationalNow,
+        ),
+    });
+
+  const showNoShowAction =
+    reservation.status ===
+      "CONFIRMED";
+
+  const noShowBlockedByPendingPayment =
+    Math.round(
+      paymentSummary.pending *
+        100,
+    ) >
+    0;
+
   const checkoutDue = isReservationCheckoutDue({
     status: reservation.status,
     endAt: reservation.endAt,
@@ -4564,6 +4780,23 @@ export default function ReservationDetailPage() {
               className="h-10 rounded-lg border border-blue-300 bg-blue-50 px-4 text-sm font-medium text-blue-900"
             >
               Registrar check-in
+            </button>
+          )}
+
+          {showNoShowAction && (
+            <button
+              type="button"
+              title={
+                !noShowDue
+                  ? "Podrás registrar la ausencia cuando llegue la hora programada de inicio."
+                  : noShowBlockedByPendingPayment
+                    ? "Debes confirmar o rechazar los pagos pendientes antes de registrar la ausencia."
+                    : "Registrar que el cliente no se presentó."
+              }
+              onClick={openNoShowDialog}
+              className="h-10 rounded-lg border border-red-300 bg-red-50 px-4 text-sm font-medium text-red-800"
+            >
+              Marcar no presentado
             </button>
           )}
 
@@ -4962,6 +5195,109 @@ export default function ReservationDetailPage() {
           {checkinResult.change.reason && (
             <p className="mt-2 text-green-800">
               Motivo: {checkinResult.change.reason}
+            </p>
+          )}
+        </div>
+      )}
+
+      {noShowResult && (
+        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-semibold">
+            Ausencia registrada correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-amber-700">
+                Hora registrada
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatDateTime(
+                  noShowResult.noShow.markedNoShowAt,
+                  business.timezone,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-amber-700">
+                Estado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(
+                  noShowResult.reservation.status,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-amber-700">
+                Total contractual
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  noShowResult.paymentSummary.total,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-amber-700">
+                Saldo contractual
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  noShowResult.paymentSummary.balance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-amber-700">
+                Recursos liberados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  noShowResult.resources
+                    .assignmentCount
+                }
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-amber-700">
+                Registrado por
+              </p>
+
+              <p className="mt-1 font-medium">
+                {noShowResult.actor.name}
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-amber-900">
+            Las fechas, precios y asignaciones permanecen como evidencia
+            histórica. Los recursos dejaron de consumir inventario y la reserva
+            ya no acepta nuevos pagos.
+          </p>
+
+          {noShowResult.paymentSummary.refundPending > 0 && (
+            <p className="mt-2 text-amber-800">
+              Las devoluciones pendientes existentes todavía pueden continuar su
+              flujo administrativo.
+            </p>
+          )}
+
+          {noShowResult.change.reason && (
+            <p className="mt-2 text-amber-900">
+              Motivo: {noShowResult.change.reason}
             </p>
           )}
         </div>
@@ -6804,6 +7140,182 @@ export default function ReservationDetailPage() {
         </div>
       )}
 
+      {noShowDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Marcar como no presentado
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Reserva {reservation.confirmationCode}
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 rounded-lg bg-zinc-50 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-500">
+                    Inicio programado
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.startAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Fin programado
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.endAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Total contractual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.total,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Saldo contractual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.balance,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pagos pendientes
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.pending,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Devoluciones pendientes
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.refundPending,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {!noShowDue && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                  La ausencia solo puede registrarse cuando llegue la hora
+                  programada de inicio.
+                </div>
+              )}
+
+              {noShowBlockedByPendingPayment && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
+                  Debes confirmar o rechazar los pagos pendientes antes de marcar
+                  la reserva como no presentada.
+                </div>
+              )}
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+                Esta acción liberará el inventario operativo sin eliminar las
+                asignaciones históricas. No modificará fechas ni precios, no
+                generará devoluciones automáticamente y la reserva dejará de
+                aceptar nuevos pagos.
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo (obligatorio)
+                </span>
+
+                <textarea
+                  rows={3}
+                  maxLength={1000}
+                  value={noShowReason}
+                  onChange={(event) =>
+                    setNoShowReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Ej. el cliente no llegó ni respondió a los intentos de contacto"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              {noShowError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {noShowError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={noShowSubmitting}
+                onClick={() => {
+                  setNoShowDialogOpen(false);
+                  setNoShowError(null);
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  noShowSubmitting ||
+                  !noShowDue ||
+                  noShowBlockedByPendingPayment ||
+                  !noShowReason.trim()
+                }
+                onClick={() =>
+                  void handleNoShow()
+                }
+                className="h-10 rounded-lg bg-red-700 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {noShowSubmitting
+                  ? "Registrando..."
+                  : "Confirmar ausencia"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {checkoutDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white shadow-xl">
@@ -7178,11 +7690,7 @@ export default function ReservationDetailPage() {
               </label>
 
 
-              {targetStatus === "NO_SHOW" && (
-                <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                  Esta acción marcará al huésped como no presentado.
-                </div>
-              )}
+
 
 
 

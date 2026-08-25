@@ -38,6 +38,40 @@ export async function PATCH(
     }
 
     // ─────────────────────────────────────────────
+    // NO-SHOW DEDICADO
+    //
+    // NO_SHOW libera inventario operativo,
+    // deshabilita pagos nuevos y representa
+    // una ausencia real del cliente.
+    //
+    // Debe registrar actor, motivo, momento
+    // y auditoría mediante la operación
+    // dedicada.
+    // ─────────────────────────────────────────────
+
+    if (
+      status ===
+      "NO_SHOW"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "NO_SHOW_REQUIRES_DEDICATED_OPERATION",
+
+          error:
+            "La ausencia debe registrarse mediante la operación dedicada de no presentación.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
     // CHECK-IN DEDICADO
     //
     // CHECKED_IN registra actor, hora real,
