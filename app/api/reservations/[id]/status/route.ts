@@ -72,6 +72,71 @@ export async function PATCH(
     }
 
     // ─────────────────────────────────────────────
+    // CONFIRMACIÓN DEDICADA
+    //
+    // CONFIRMED representa la aceptación
+    // contractual y operativa de la reserva.
+    //
+    // Debe volver a validar el pago inicial,
+    // registrar al actor y crear auditoría.
+    // ─────────────────────────────────────────────
+
+    if (
+      status ===
+      "CONFIRMED"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "CONFIRMATION_REQUIRES_DEDICATED_OPERATION",
+
+          error:
+            "La reserva debe confirmarse mediante la operación dedicada de confirmación.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // CANCELACIÓN DEDICADA
+    //
+    // CANCELLED puede generar devoluciones y
+    // debe conservar su contrato financiero,
+    // actor, motivo y auditoría.
+    //
+    // Por eso nunca debe aplicarse mediante
+    // el cambio genérico de estado.
+    // ─────────────────────────────────────────────
+
+    if (
+      status ===
+      "CANCELLED"
+    ) {
+      return NextResponse.json(
+        {
+          success:
+            false,
+
+          code:
+            "CANCELLATION_REQUIRES_DEDICATED_OPERATION",
+
+          error:
+            "La cancelación debe registrarse mediante la operación dedicada de cancelación.",
+        },
+        {
+          status:
+            409,
+        },
+      );
+    }
+
+    // ─────────────────────────────────────────────
     // CHECK-IN DEDICADO
     //
     // CHECKED_IN registra actor, hora real,

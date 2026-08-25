@@ -835,6 +835,75 @@ type CheckoutResponse = {
   };
 };
 
+type ConfirmationResponse = {
+  success: true;
+
+  reservation:
+    CheckoutResponse[
+      "reservation"
+    ];
+
+  actor:
+    CheckoutResponse[
+      "actor"
+    ];
+
+  confirmation: {
+    confirmedAt: string;
+
+    initialPaymentSatisfied:
+      boolean;
+
+    requiredInitialPayment:
+      number | null;
+
+    initialPaymentRemaining:
+      number | null;
+
+    remainingBalance:
+      number;
+  };
+
+  change:
+    CheckoutResponse[
+      "change"
+    ];
+
+  resources: {
+    retained: Array<{
+      id: string;
+
+      reservationServiceId:
+        string | null;
+
+      reservationOptionId:
+        string | null;
+
+      resourceId:
+        string;
+    }>;
+
+    assignmentCount:
+      number;
+
+    assignmentsRetained:
+      boolean;
+
+    inventoryContinuesByStatus:
+      boolean;
+  };
+
+  paymentSummary:
+    CheckoutResponse[
+      "paymentSummary"
+    ];
+
+  financialState:
+    CheckoutResponse[
+      "financialState"
+    ];
+};
+
 type CheckinResponse = {
   success: true;
 
@@ -1474,7 +1543,7 @@ const STATUS_TRANSITIONS: Record<
   ReservationOperationalStatus,
   ReservationOperationalStatus[]
 > = {
-  PENDING: ["CONFIRMED"],
+  PENDING: [],
 
   CONFIRMED: [],
 
@@ -1612,6 +1681,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "STAY_EXTENSION":
       return "Extensión de estancia";
+
+    case "CONFIRMATION":
+      return "Confirmación";
 
     case "CHECK_IN":
       return "Check-in";
@@ -2161,6 +2233,21 @@ export default function ReservationDetailPage() {
 
   const [stayExtensionResult, setStayExtensionResult] =
     useState<StayExtensionResponse | null>(null);
+  const [confirmationDialogOpen, setConfirmationDialogOpen] =
+    useState(false);
+
+  const [confirmationReason, setConfirmationReason] =
+    useState("");
+
+  const [confirmationSubmitting, setConfirmationSubmitting] =
+    useState(false);
+
+  const [confirmationError, setConfirmationError] =
+    useState<string | null>(null);
+
+  const [confirmationResult, setConfirmationResult] =
+    useState<ConfirmationResponse | null>(null);
+
   const [checkinDialogOpen, setCheckinDialogOpen] =
     useState(false);
 
@@ -3021,6 +3108,143 @@ export default function ReservationDetailPage() {
       );
     }
   }
+  function openConfirmationDialog() {
+    if (
+      !data
+    ) {
+      return;
+    }
+
+    setConfirmationReason(
+      "",
+    );
+
+    setConfirmationError(
+      null,
+    );
+
+    setConfirmationResult(
+      null,
+    );
+
+    setStatusError(
+      null,
+    );
+
+    setStatusSuccess(
+      null,
+    );
+
+    setConfirmationDialogOpen(
+      true,
+    );
+  }
+
+  async function handleConfirmation() {
+    if (
+      !data
+    ) {
+      return;
+    }
+
+    if (
+      !data.paymentSummary
+        .initialPaymentSatisfied
+    ) {
+      setConfirmationError(
+        "La reserva no puede confirmarse hasta cubrir el pago inicial requerido.",
+      );
+
+      return;
+    }
+
+    if (
+      confirmationReason.trim().length >
+      1000
+    ) {
+      setConfirmationError(
+        "El motivo de la confirmación no puede superar los 1000 caracteres.",
+      );
+
+      return;
+    }
+
+    setConfirmationSubmitting(
+      true,
+    );
+
+    setConfirmationError(
+      null,
+    );
+
+    try {
+      const response =
+        await fetch(
+          `/api/reservations/${reservationId}/confirm`,
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                changedById:
+                  TEMP_RECEPTION_USER_ID,
+
+                reason:
+                  confirmationReason.trim() ||
+                  undefined,
+              }),
+          },
+        );
+
+      const result =
+        await response.json();
+
+      if (
+        !response.ok
+      ) {
+        throw new Error(
+          typeof result.error ===
+            "string"
+            ? result.error
+            : "No fue posible confirmar la reserva",
+        );
+      }
+
+      const confirmationResponse =
+        result as
+          ConfirmationResponse;
+
+      setConfirmationResult(
+        confirmationResponse,
+      );
+
+      setConfirmationDialogOpen(
+        false,
+      );
+
+      await loadReservation();
+    } catch (
+      error
+    ) {
+      setConfirmationError(
+        error instanceof
+          Error
+          ? error.message
+          : "No fue posible confirmar la reserva",
+      );
+    } finally {
+      setConfirmationSubmitting(
+        false,
+      );
+    }
+  }
+
   function openCheckinDialog() {
     if (!data) {
       return;
@@ -4509,6 +4733,14 @@ export default function ReservationDetailPage() {
     ? STATUS_TRANSITIONS[reservation.status]
     : [];
 
+  const showConfirmationAction =
+    reservation.status ===
+    "PENDING";
+
+  const confirmationBlockedByInitialPayment =
+    !paymentSummary
+      .initialPaymentSatisfied;
+
   const checkinDue =
     isReservationCheckinDue({
       status:
@@ -4763,6 +4995,23 @@ export default function ReservationDetailPage() {
           >
             {resourceActionLabel}
           </button>
+
+          {showConfirmationAction && (
+            <button
+              type="button"
+              title={
+                confirmationBlockedByInitialPayment
+                  ? "Debes cubrir el pago inicial antes de confirmar la reserva."
+                  : "Confirmar contractual y operativamente la reserva."
+              }
+              onClick={
+                openConfirmationDialog
+              }
+              className="h-10 rounded-lg border border-emerald-300 bg-emerald-50 px-4 text-sm font-medium text-emerald-900"
+            >
+              Confirmar reserva
+            </button>
+          )}
 
           {showCheckinAction && (
             <button
@@ -5076,6 +5325,115 @@ export default function ReservationDetailPage() {
             <p className="mt-3 text-amber-800">
               Uno o más recursos asignados fueron liberados porque no podían
               mantenerse en las nuevas fechas.
+            </p>
+          )}
+        </div>
+      )}
+
+      {confirmationResult && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+          <p className="font-semibold">
+            Reserva confirmada correctamente
+          </p>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <p className="text-xs text-emerald-700">
+                Hora de confirmación
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatDateTime(
+                  confirmationResult
+                    .confirmation
+                    .confirmedAt,
+                  business.timezone,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-emerald-700">
+                Estado
+              </p>
+
+              <p className="mt-1 font-medium">
+                {getStatusLabel(
+                  confirmationResult
+                    .reservation
+                    .status,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-emerald-700">
+                Pago inicial
+              </p>
+
+              <p className="mt-1 font-medium">
+                Cubierto
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-emerald-700">
+                Saldo restante
+              </p>
+
+              <p className="mt-1 font-medium">
+                {formatMoney(
+                  confirmationResult
+                    .confirmation
+                    .remainingBalance,
+                  business.currency,
+                )}
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-emerald-700">
+                Recursos conservados
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  confirmationResult
+                    .resources
+                    .assignmentCount
+                }
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs text-emerald-700">
+                Confirmada por
+              </p>
+
+              <p className="mt-1 font-medium">
+                {
+                  confirmationResult
+                    .actor
+                    .name
+                }
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-3 text-emerald-800">
+            Las fechas, precios, complementos y asignaciones permanecen sin
+            cambios. La reserva continúa consumiendo inventario y puede recibir
+            el saldo restante.
+          </p>
+
+          {confirmationResult.change.reason && (
+            <p className="mt-2 text-emerald-800">
+              Motivo:{" "}
+              {
+                confirmationResult
+                  .change
+                  .reason
+              }
             </p>
           )}
         </div>
@@ -6971,6 +7329,204 @@ export default function ReservationDetailPage() {
           )}
         </div>
       </div>
+      {confirmationDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-xl">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="font-semibold">
+                Confirmar reserva
+              </h2>
+
+              <p className="mt-1 text-sm text-zinc-500">
+                Reserva {
+                  reservation
+                    .confirmationCode
+                }
+              </p>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 rounded-lg bg-zinc-50 p-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-500">
+                    Inicio programado
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.startAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Fin programado
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatDateTime(
+                      reservation.endAt,
+                      business.timezone,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Total contractual
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.total,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago inicial requerido
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {paymentSummary
+                      .requiredInitialPayment ===
+                    null
+                      ? "No definido"
+                      : formatMoney(
+                          paymentSummary
+                            .requiredInitialPayment,
+                          business.currency,
+                        )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago neto registrado
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.netPaid,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Pago inicial pendiente
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary
+                        .initialPaymentRemaining ??
+                        0,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-zinc-500">
+                    Saldo contractual restante
+                  </p>
+
+                  <p className="mt-1 font-medium">
+                    {formatMoney(
+                      paymentSummary.balance,
+                      business.currency,
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              {confirmationBlockedByInitialPayment && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
+                  Debes cubrir el pago inicial requerido antes de confirmar la
+                  reserva.
+                </div>
+              )}
+
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm leading-6 text-emerald-800">
+                La confirmación conservará las fechas, precios, complementos y
+                asignaciones actuales. La reserva seguirá consumiendo inventario
+                y cualquier saldo restante podrá cobrarse después.
+              </div>
+
+              <label className="flex flex-col gap-2 text-sm">
+                <span className="font-medium">
+                  Motivo (opcional)
+                </span>
+
+                <textarea
+                  rows={3}
+                  maxLength={1000}
+                  value={
+                    confirmationReason
+                  }
+                  onChange={(event) =>
+                    setConfirmationReason(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Ej. pago inicial verificado y reserva aprobada"
+                  className="rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              {confirmationError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
+                  {confirmationError}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={
+                  confirmationSubmitting
+                }
+                onClick={() => {
+                  setConfirmationDialogOpen(
+                    false,
+                  );
+
+                  setConfirmationError(
+                    null,
+                  );
+                }}
+                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  confirmationSubmitting ||
+                  confirmationBlockedByInitialPayment
+                }
+                onClick={() =>
+                  void handleConfirmation()
+                }
+                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {confirmationSubmitting
+                  ? "Confirmando..."
+                  : "Confirmar reserva"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {checkinDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl bg-white shadow-xl">
