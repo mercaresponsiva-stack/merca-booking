@@ -1539,31 +1539,23 @@ type ReservationOperationalStatus =
   | "CHECKED_OUT"
   | "COMPLETED";
 
-const STATUS_TRANSITIONS: Record<
-  ReservationOperationalStatus,
-  ReservationOperationalStatus[]
-> = {
-  PENDING: [],
-
-  CONFIRMED: [],
-
-  CANCELLED: [],
-
-  NO_SHOW: [],
-
-  CHECKED_IN: [],
-
-  CHECKED_OUT: [],
-
-  COMPLETED: [],
-};
+const RESERVATION_OPERATIONAL_STATUSES: readonly ReservationOperationalStatus[] = [
+  "PENDING",
+  "CONFIRMED",
+  "CANCELLED",
+  "NO_SHOW",
+  "CHECKED_IN",
+  "CHECKED_OUT",
+  "COMPLETED",
+];
 
 function isOperationalStatus(
   value: string,
 ): value is ReservationOperationalStatus {
-  return value in STATUS_TRANSITIONS;
+  return RESERVATION_OPERATIONAL_STATUSES.includes(
+    value as ReservationOperationalStatus,
+  );
 }
-
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("es-SV", {
     style: "currency",
@@ -2402,18 +2394,6 @@ export default function ReservationDetailPage() {
 
   const [selectedResourceId, setSelectedResourceId] = useState("");
 
-  const [statusDialogOpen, setStatusDialogOpen] = useState(false);
-
-  const [targetStatus, setTargetStatus] = useState<
-    ReservationOperationalStatus | ""
-  >("");
-
-  const [statusSubmitting, setStatusSubmitting] = useState(false);
-
-  const [statusError, setStatusError] = useState<string | null>(null);
-
-  const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
-
   const [data, setData] = useState<ReservationDetailResponse | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -2490,60 +2470,6 @@ export default function ReservationDetailPage() {
     };
   }, [fetchReservation]);
 
-  async function handleStatusChange() {
-    if (!targetStatus) {
-      setStatusError("Selecciona el nuevo estado.");
-      return;
-    }
-
-    setStatusSubmitting(true);
-    setStatusError(null);
-    setStatusSuccess(null);
-
-    try {
-      const response = await fetch(
-        `/api/reservations/${reservationId}/status`,
-        {
-          method: "PATCH",
-
-          headers: {
-            "Content-Type": "application/json",
-          },
-
-          body: JSON.stringify({
-            status: targetStatus,
-          }),
-        },
-      );
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          typeof result.error === "string"
-            ? result.error
-            : "No fue posible cambiar el estado de la reserva",
-        );
-      }
-
-      const newStatus = result.reservation?.status ?? targetStatus;
-
-      setStatusDialogOpen(false);
-      setTargetStatus("");
-
-      setStatusSuccess(`Estado actualizado a ${getStatusLabel(newStatus)}.`);
-
-      await loadReservation();
-    } catch (error) {
-      setStatusError(
-        error instanceof Error
-          ? error.message
-          : "No fue posible cambiar el estado de la reserva",
-      );
-    } finally {
-      setStatusSubmitting(false);
-    }
-  }
 
   async function openResourceDialog() {
     setResourceDialogOpen(true);
@@ -3127,14 +3053,6 @@ export default function ReservationDetailPage() {
       null,
     );
 
-    setStatusError(
-      null,
-    );
-
-    setStatusSuccess(
-      null,
-    );
-
     setConfirmationDialogOpen(
       true,
     );
@@ -3253,9 +3171,6 @@ export default function ReservationDetailPage() {
     setCheckinReason("");
     setCheckinError(null);
     setCheckinResult(null);
-
-    setStatusError(null);
-    setStatusSuccess(null);
 
     setCheckinDialogOpen(true);
   }
@@ -3376,9 +3291,6 @@ export default function ReservationDetailPage() {
     setNoShowReason("");
     setNoShowError(null);
     setNoShowResult(null);
-
-    setStatusError(null);
-    setStatusSuccess(null);
 
     setNoShowDialogOpen(true);
   }
@@ -3501,9 +3413,6 @@ export default function ReservationDetailPage() {
     setCheckoutError(null);
     setCheckoutResult(null);
 
-    setStatusError(null);
-    setStatusSuccess(null);
-
     setCheckoutDialogOpen(true);
   }
 
@@ -3606,9 +3515,6 @@ export default function ReservationDetailPage() {
     setCompletionResult(null);
 
     setCheckoutResult(null);
-    setStatusError(null);
-    setStatusSuccess(null);
-
     setCompletionDialogOpen(true);
   }
 
@@ -4729,10 +4635,6 @@ export default function ReservationDetailPage() {
         ? (paymentSummary.initialPaymentRemaining ?? 0)
         : financialState.amountDue;
 
-  const availableStatusTransitions = isOperationalStatus(reservation.status)
-    ? STATUS_TRANSITIONS[reservation.status]
-    : [];
-
   const showConfirmationAction =
     reservation.status ===
     "PENDING";
@@ -5083,26 +4985,6 @@ export default function ReservationDetailPage() {
             </button>
           )}
 
-          {availableStatusTransitions.length > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                setStatusError(null);
-                setStatusSuccess(null);
-
-                setTargetStatus(
-                  availableStatusTransitions[0] ??
-                    "",
-                );
-
-                setStatusDialogOpen(true);
-              }}
-              className="h-10 rounded-lg border border-zinc-300 bg-white px-4 text-sm font-medium"
-            >
-              Cambiar estado
-            </button>
-          )}
-
           <button
             type="button"
             disabled={!canRegisterPayment}
@@ -5113,12 +4995,6 @@ export default function ReservationDetailPage() {
           </button>
         </div>
       </div>
-
-      {statusSuccess && (
-        <div className="mt-6 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
-          {statusSuccess}
-        </div>
-      )}
 
       {resourceSuccess && (
         <div className="mt-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800">
@@ -8197,89 +8073,6 @@ export default function ReservationDetailPage() {
                 {completionSubmitting
                   ? "Completando..."
                   : "Confirmar cierre"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {statusDialogOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white shadow-xl">
-            <div className="border-b border-zinc-200 px-5 py-4">
-              <h2 className="font-semibold">Cambiar estado</h2>
-
-              <p className="mt-1 text-sm text-zinc-500">
-                Reserva {reservation.confirmationCode}
-              </p>
-            </div>
-
-            <div className="p-5">
-              <div className="rounded-lg bg-zinc-50 p-4 text-sm">
-                <p className="text-zinc-500">Estado actual</p>
-
-                <p className="mt-1 font-medium">
-                  {getStatusLabel(reservation.status)}
-                </p>
-              </div>
-
-              <label className="mt-5 flex flex-col gap-2 text-sm">
-                <span className="font-medium">Nuevo estado</span>
-
-                <select
-                  value={targetStatus}
-                  onChange={(event) => {
-                    const value = event.target.value;
-
-                    if (isOperationalStatus(value)) {
-                      setTargetStatus(value);
-                    }
-                  }}
-                  className="h-10 rounded-lg border border-zinc-300 bg-white px-3"
-                >
-                  {availableStatusTransitions.map((status) => (
-                    <option key={status} value={status}>
-                      {getStatusLabel(status)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-
-
-
-
-
-              {statusError && (
-                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-medium text-red-700">
-                  {statusError}
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-end gap-3 border-t border-zinc-200 px-5 py-4">
-              <button
-                type="button"
-                disabled={statusSubmitting}
-                onClick={() => {
-                  setStatusDialogOpen(false);
-                  setStatusError(null);
-                }}
-                className="h-10 rounded-lg border border-zinc-300 px-4 text-sm font-medium disabled:opacity-50"
-              >
-                Cancelar
-              </button>
-
-              <button
-                type="button"
-                disabled={
-                  !targetStatus ||
-                  statusSubmitting
-                }
-                onClick={() => void handleStatusChange()}
-                className="h-10 rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white disabled:opacity-50"
-              >
-                {statusSubmitting ? "Actualizando..." : "Confirmar cambio"}
               </button>
             </div>
           </div>
