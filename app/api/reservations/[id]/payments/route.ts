@@ -1,4 +1,5 @@
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
+import { validatePendingReservationPaymentWindow } from "@/lib/booking/reservation-expiration-deadline";
 import { isReservationPayable } from "@/lib/booking/reservation-state";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { fromCents, toCents } from "@/lib/booking/money";
@@ -74,6 +75,9 @@ export async function GET(
         confirmationCode: reservation.confirmationCode,
 
         status: reservation.status,
+
+        expiresAt:
+          reservation.expiresAt,
 
         total: reservation.total,
 
@@ -151,6 +155,9 @@ export async function POST(
 
             status: true,
 
+            expiresAt:
+              true,
+
             total: true,
 
             paymentOption: true,
@@ -164,6 +171,17 @@ export async function POST(
         if (!isReservationPayable(reservation.status)) {
           throw new Error("RESERVATION_NOT_PAYABLE");
         }
+
+        validatePendingReservationPaymentWindow({
+          status:
+            reservation.status,
+
+          expiresAt:
+            reservation.expiresAt,
+
+          requestedAt:
+            new Date(),
+        });
 
         // Las reservas nuevas deben tener
         // modalidad de pago definida.
@@ -449,6 +467,9 @@ export async function POST(
 
           status: result.reservation.status,
 
+          expiresAt:
+            result.reservation.expiresAt,
+
           total: result.reservation.total,
 
           paymentOption: result.reservation.paymentOption,
@@ -463,7 +484,25 @@ export async function POST(
       },
     );
   } catch (error) {
-    console.error("POST reservation payment error:", error);
+    const isExpectedExpirationPaymentError =
+      error instanceof Error &&
+      (
+        error.message ===
+          "PENDING_RESERVATION_EXPIRATION_NOT_CONFIGURED" ||
+        error.message ===
+          "INVALID_PENDING_RESERVATION_EXPIRATION_TIMESTAMP" ||
+        error.message ===
+          "PENDING_RESERVATION_PAYMENT_WINDOW_EXPIRED"
+      );
+
+    if (
+      !isExpectedExpirationPaymentError
+    ) {
+      console.error(
+        "POST reservation payment error:",
+        error,
+      );
+    }
 
     if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
       return NextResponse.json(
@@ -482,6 +521,69 @@ export async function POST(
         {
           success: false,
           error: "La reserva no permite nuevos pagos",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "PENDING_RESERVATION_EXPIRATION_NOT_CONFIGURED"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          code:
+            error.message,
+
+          error:
+            "La reserva pendiente no tiene una fecha de vencimiento configurada.",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "INVALID_PENDING_RESERVATION_EXPIRATION_TIMESTAMP"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          code:
+            error.message,
+
+          error:
+            "La fecha de vencimiento de la reserva pendiente no es válida.",
+        },
+        {
+          status: 409,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "PENDING_RESERVATION_PAYMENT_WINDOW_EXPIRED"
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+
+          code:
+            error.message,
+
+          error:
+            "El plazo de pago de la reserva venció y no pueden iniciarse pagos nuevos.",
         },
         {
           status: 409,

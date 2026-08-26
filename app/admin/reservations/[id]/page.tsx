@@ -404,6 +404,7 @@ type ReservationDetailResponse = {
     source: string | null;
     startAt: string;
     endAt: string;
+    expiresAt: string | null;
     guests: number;
     adults: number | null;
     children: number | null;
@@ -1537,7 +1538,8 @@ type ReservationOperationalStatus =
   | "NO_SHOW"
   | "CHECKED_IN"
   | "CHECKED_OUT"
-  | "COMPLETED";
+  | "COMPLETED"
+  | "EXPIRED";
 
 const RESERVATION_OPERATIONAL_STATUSES: readonly ReservationOperationalStatus[] = [
   "PENDING",
@@ -1547,6 +1549,7 @@ const RESERVATION_OPERATIONAL_STATUSES: readonly ReservationOperationalStatus[] 
   "CHECKED_IN",
   "CHECKED_OUT",
   "COMPLETED",
+  "EXPIRED",
 ];
 
 function isOperationalStatus(
@@ -1640,6 +1643,9 @@ function getStatusLabel(status: string) {
     case "COMPLETED":
       return "Completada";
 
+    case "EXPIRED":
+      return "Vencida";
+
     case "PAID":
       return "Pagado";
 
@@ -1688,6 +1694,9 @@ function getReservationChangeTypeLabel(type: string) {
 
     case "COMPLETION":
       return "Cierre administrativo";
+
+    case "EXPIRATION":
+      return "Vencimiento automático";
 
     case "MANUAL":
       return "Cambio manual";
@@ -4853,6 +4862,29 @@ export default function ReservationDetailPage() {
           <p className="mt-2 text-sm text-zinc-500">
             Creada {formatDateTime(reservation.createdAt, business.timezone)}
           </p>
+
+          {reservation.expiresAt &&
+            (reservation.status === "PENDING" ||
+              reservation.status === "EXPIRED") && (
+              <p
+                className={`mt-1 text-sm font-medium ${
+                  reservation.status === "EXPIRED" ||
+                  operationalNow >= Date.parse(reservation.expiresAt)
+                    ? "text-red-700"
+                    : "text-amber-700"
+                }`}
+              >
+                {reservation.status === "EXPIRED"
+                  ? "Venció el "
+                  : operationalNow >= Date.parse(reservation.expiresAt)
+                    ? "El plazo de pago venció el "
+                    : "El plazo de pago vence el "}
+                {formatDateTime(
+                  reservation.expiresAt,
+                  business.timezone,
+                )}
+              </p>
+            )}
         </div>
 
         <div className="flex flex-wrap gap-2">

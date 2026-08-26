@@ -12,6 +12,7 @@ import {
   getResourceTypeInventoryState,
 } from "@/lib/booking/resource-type-inventory";
 import { isValidDateOnly, zonedDateTimeToUtc } from "@/lib/booking/datetime";
+import { calculatePendingReservationExpiresAt } from "@/lib/booking/reservation-expiration-deadline";
 import {
   isReservationStatus,
   type ReservationStatus,
@@ -412,6 +413,9 @@ export async function GET(request: NextRequest) {
         startAt: reservation.startAt,
 
         endAt: reservation.endAt,
+
+        expiresAt:
+          reservation.expiresAt,
 
         guests: reservation.guests,
 
@@ -859,6 +863,9 @@ export async function POST(request: NextRequest) {
         timezone: true,
         checkInTime: true,
         checkOutTime: true,
+
+        pendingReservationHoldMinutes:
+          true,
       },
     });
 
@@ -1291,6 +1298,21 @@ export async function POST(request: NextRequest) {
         // 14. RESERVATION
         // ─────────────────────────────────────────
 
+        const reservationCreatedAt =
+          new Date();
+
+        const reservationExpiresAt =
+          calculatePendingReservationExpiresAt(
+            {
+              createdAt:
+                reservationCreatedAt,
+
+              holdMinutes:
+                business
+                  .pendingReservationHoldMinutes,
+            },
+          );
+
         const reservation = await tx.reservation.create({
           data: {
             businessId: business.id,
@@ -1306,6 +1328,12 @@ export async function POST(request: NextRequest) {
             children,
 
             status: "PENDING",
+
+            createdAt:
+              reservationCreatedAt,
+
+            expiresAt:
+              reservationExpiresAt,
 
             subtotal,
             total,
@@ -1524,6 +1552,9 @@ export async function POST(request: NextRequest) {
           startAt: reservation.startAt,
 
           endAt: reservation.endAt,
+
+          expiresAt:
+            reservation.expiresAt,
 
           /*
            * Hotel-facing values.

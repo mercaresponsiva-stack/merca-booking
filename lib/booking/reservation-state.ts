@@ -2,6 +2,7 @@ export const RESERVATION_STATUSES = [
   "PENDING",
   "CONFIRMED",
   "CANCELLED",
+  "EXPIRED",
   "NO_SHOW",
   "CHECKED_IN",
   "CHECKED_OUT",
@@ -31,7 +32,7 @@ const RESERVATION_TRANSITIONS: Record<
   ReservationStatus,
   readonly ReservationStatus[]
 > = {
-  PENDING: ["CONFIRMED", "CANCELLED"],
+  PENDING: ["CONFIRMED", "CANCELLED", "EXPIRED"],
 
   CONFIRMED: ["CHECKED_IN", "CANCELLED", "NO_SHOW"],
 
@@ -40,6 +41,7 @@ const RESERVATION_TRANSITIONS: Record<
   CHECKED_OUT: ["COMPLETED"],
 
   CANCELLED: [],
+  EXPIRED: [],
   NO_SHOW: [],
   COMPLETED: [],
 };
@@ -94,6 +96,7 @@ export function isReservationActive(status: ReservationStatus) {
 // CHECKED_IN  → sí
 //
 // CANCELLED   → no
+// EXPIRED     → no
 // NO_SHOW     → no
 // CHECKED_OUT → no
 // COMPLETED   → no

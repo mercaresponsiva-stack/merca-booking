@@ -15,6 +15,7 @@ const RESERVATION_STATUSES = [
   "CHECKED_IN",
   "CHECKED_OUT",
   "COMPLETED",
+  "EXPIRED",
 ] as const;
 
 type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
@@ -395,6 +396,9 @@ function getStatusLabel(status: ReservationStatus) {
 
     case "COMPLETED":
       return "Completada";
+
+    case "EXPIRED":
+      return "Vencida";
   }
 }
 
@@ -558,8 +562,14 @@ export default function CalendarPage() {
   }, []);
 
   useEffect(() => {
-    void loadReservations();
-    void loadBlocks();
+    const timeoutId = window.setTimeout(() => {
+      void loadReservations();
+      void loadBlocks();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [loadReservations, loadBlocks]);
 
   const availableStatuses = useMemo<readonly ReservationStatus[]>(

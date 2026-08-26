@@ -32,6 +32,10 @@ model Business {
   checkInTime  String?
   checkOutTime String?
 
+  // Tiempo durante el que una reserva pendiente
+  // conserva inventario mientras espera pago.
+  pendingReservationHoldMinutes Int @default(30)
+
   // Configuración general
   isActive Boolean @default(true)
 
@@ -395,8 +399,8 @@ model ReservationOption {
 
   quantity Int @default(1)
 
-  includedQuantity Int @default(0)
-  optionalQuantity Int @default(0)
+  includedQuantity        Int @default(0)
+  optionalQuantity        Int @default(0)
   removedOptionalQuantity Int @default(0)
 
   // Snapshot de precio/configuracion.
@@ -584,6 +588,10 @@ model Reservation {
 
   status ReservationStatus @default(PENDING)
 
+  // Vencimiento original de la retención PENDING.
+  // Se conserva después de la transición para auditoría.
+  expiresAt DateTime?
+
   subtotal Decimal @db.Decimal(10, 2)
   total    Decimal @db.Decimal(10, 2)
 
@@ -616,6 +624,7 @@ model Reservation {
   @@index([businessId, startAt, endAt])
   @@index([customerId])
   @@index([status])
+  @@index([status, expiresAt])
 }
 
 // ─────────────────────────────────────────────
@@ -988,6 +997,7 @@ enum ReservationStatus {
   PENDING
   CONFIRMED
   CANCELLED
+  EXPIRED
   NO_SHOW
   CHECKED_IN
   CHECKED_OUT
@@ -1056,6 +1066,7 @@ enum ReservationChangeType {
   RESCHEDULE
   STAY_EXTENSION
   CONFIRMATION
+  EXPIRATION
   CHECK_IN
   NO_SHOW
   CHECK_OUT

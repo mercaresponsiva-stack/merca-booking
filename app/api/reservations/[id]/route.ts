@@ -240,6 +240,8 @@ export async function GET(_request: Request, context: RouteContext) {
 
         endAt: reservation.endAt,
 
+        expiresAt: reservation.expiresAt,
+
         guests: reservation.guests,
 
         adults: reservation.adults,

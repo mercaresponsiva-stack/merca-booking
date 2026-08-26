@@ -14,6 +14,7 @@ const RESERVATION_STATUSES = [
   "CHECKED_IN",
   "CHECKED_OUT",
   "COMPLETED",
+  "EXPIRED",
 ] as const;
 
 type ReservationStatus = (typeof RESERVATION_STATUSES)[number];
@@ -25,6 +26,7 @@ type ReservationListItem = {
   source: string | null;
   startAt: string;
   endAt: string;
+  expiresAt: string | null;
   guests: number;
   adults: number | null;
   children: number | null;
@@ -133,6 +135,17 @@ function formatDate(value: string, timezone: string) {
   }).format(new Date(value));
 }
 
+function formatReservationExpiration(value: string, timezone: string) {
+  return new Intl.DateTimeFormat("es-SV", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 function getStatusLabel(status: ReservationStatus) {
   switch (status) {
     case "PENDING":
@@ -155,6 +168,9 @@ function getStatusLabel(status: ReservationStatus) {
 
     case "COMPLETED":
       return "Completada";
+
+    case "EXPIRED":
+      return "Vencida";
   }
 }
 
@@ -540,6 +556,31 @@ export default function ReservationsPage() {
                         <span className="inline-flex rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium">
                           {getStatusLabel(reservation.status)}
                         </span>
+
+                        {reservation.expiresAt &&
+                          (reservation.status === "PENDING" ||
+                            reservation.status === "EXPIRED") && (
+                            <p
+                              className={`mt-1 text-xs font-medium ${
+                                reservation.status === "EXPIRED" ||
+                                operationalNow >=
+                                  Date.parse(reservation.expiresAt)
+                                  ? "text-red-700"
+                                  : "text-amber-700"
+                              }`}
+                            >
+                              {reservation.status === "EXPIRED"
+                                ? "Venció "
+                                : operationalNow >=
+                                    Date.parse(reservation.expiresAt)
+                                  ? "Plazo vencido "
+                                  : "Vence "}
+                              {formatReservationExpiration(
+                                reservation.expiresAt,
+                                data.business.timezone,
+                              )}
+                            </p>
+                          )}
 
                         {isReservationCheckoutDue({
                           status: reservation.status,

@@ -36,7 +36,17 @@ export function calculateReservationFinancialState({
    * historial económico, pero ya no existe
    * un saldo exigible por la estancia.
    */
-  const amountDueCents = status === "CANCELLED" ? 0 : contractualBalanceCents;
+  /*
+   * EXPIRED follows the same non-collectible
+   * balance rule without being a cancellation.
+   */
+  const amountDueCents =
+    status ===
+      "CANCELLED" ||
+    status ===
+      "EXPIRED"
+      ? 0
+      : contractualBalanceCents;
 
   const paymentAcceptanceAllowedByStatus = isReservationPayable(status);
 

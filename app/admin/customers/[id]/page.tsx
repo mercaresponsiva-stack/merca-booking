@@ -13,7 +13,8 @@ type ReservationStatus =
   | "NO_SHOW"
   | "CHECKED_IN"
   | "CHECKED_OUT"
-  | "COMPLETED";
+  | "COMPLETED"
+  | "EXPIRED";
 
 type ReservationSource =
   | "WEBSITE"
@@ -145,6 +146,9 @@ function getStatusLabel(status: ReservationStatus) {
 
     case "COMPLETED":
       return "Completada";
+
+    case "EXPIRED":
+      return "Vencida";
   }
 }
 
@@ -252,7 +256,13 @@ export default function CustomerDetailPage() {
   }, [customerId]);
 
   useEffect(() => {
-    void loadCustomer();
+    const timeoutId = window.setTimeout(() => {
+      void loadCustomer();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [loadCustomer]);
 
   function openEditCustomer() {

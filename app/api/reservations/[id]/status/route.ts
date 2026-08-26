@@ -37,6 +37,14 @@ const STATUS_BARRIERS: Record<
       "La cancelación debe registrarse mediante la operación dedicada de cancelación.",
   },
 
+  EXPIRED: {
+    code:
+      "EXPIRATION_REQUIRES_DEDICATED_OPERATION",
+
+    error:
+      "La expiración debe registrarse mediante la operación dedicada de vencimiento.",
+  },
+
   NO_SHOW: {
     code:
       "NO_SHOW_REQUIRES_DEDICATED_OPERATION",
