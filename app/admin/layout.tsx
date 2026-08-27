@@ -1,10 +1,78 @@
-﻿import Link from "next/link";
+import Link from "next/link";
+import { redirect } from "next/navigation";
 
-export default function AdminLayout({
+import SignOutButton from "./SignOutButton";
+
+import {
+  AuthorizationError,
+  requireBusinessAccess,
+  type BusinessAccess,
+} from "@/lib/auth/business-access";
+import { DEV_BUSINESS_ID } from "@/lib/config/dev-context";
+
+export const dynamic = "force-dynamic";
+
+export default async function AdminLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  let access: BusinessAccess;
+
+  try {
+    // Temporal: debe coincidir con el negocio usado por las pantallas.
+    access = await requireBusinessAccess(DEV_BUSINESS_ID);
+  } catch (error) {
+    if (error instanceof AuthorizationError && error.status === 401) {
+      redirect("/login");
+    }
+
+    const accessDenied =
+      error instanceof AuthorizationError && error.status === 403;
+
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-5 text-zinc-950">
+        <section className="w-full max-w-md space-y-4 rounded-xl border border-zinc-200 bg-white p-6">
+          <p className="text-sm font-medium text-zinc-500">Merca Booking</p>
+
+          <h1 className="text-xl font-semibold">
+            {accessDenied
+              ? "Acceso no autorizado"
+              : "Acceso temporalmente no disponible"}
+          </h1>
+
+          <p className="text-sm text-zinc-600">
+            {accessDenied
+              ? "Tu cuenta no tiene acceso activo a este negocio. Consulta con su administrador."
+              : "No pudimos comprobar tu acceso. Inténtalo de nuevo en unos instantes."}
+          </p>
+
+          <Link
+            href="/login"
+            prefetch={false}
+            className="inline-flex h-10 items-center rounded-lg bg-zinc-900 px-4 text-sm font-medium text-white"
+          >
+            Ir a iniciar sesión
+          </Link>
+
+          <div className="flex justify-end">
+            <SignOutButton />
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const initials =
+    access.user.name
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part.charAt(0))
+      .join("")
+      .toUpperCase() || "U";
+
   return (
     <div className="min-h-screen bg-zinc-100 text-zinc-950">
       <div className="min-h-screen lg:grid lg:grid-cols-[260px_1fr]">
@@ -168,7 +236,7 @@ export default function AdminLayout({
 
             <div className="hidden border-t border-zinc-800 p-4 lg:block">
               <div className="rounded-xl bg-zinc-900 p-4">
-                <p className="text-sm font-medium">Hotel Demo</p>
+                <p className="text-sm font-medium">{access.business.name}</p>
 
                 <p className="mt-1 text-xs text-zinc-500">
                   Entorno de desarrollo
@@ -188,14 +256,16 @@ export default function AdminLayout({
 
             <div className="flex items-center gap-3">
               <div className="hidden text-right sm:block">
-                <p className="text-sm font-medium">Recepción Demo</p>
+                <p className="text-sm font-medium">{access.user.name}</p>
 
-                <p className="text-xs text-zinc-500">RECEPTIONIST</p>
+                <p className="text-xs text-zinc-500">{access.role}</p>
               </div>
 
               <div className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-900 text-xs font-semibold text-white">
-                RD
+                {initials}
               </div>
+
+              <SignOutButton />
             </div>
           </header>
 
