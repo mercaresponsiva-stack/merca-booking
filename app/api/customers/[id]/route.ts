@@ -1,6 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+
+import {
+  AuthorizationError,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
 
 export async function GET(
   request: NextRequest,
@@ -17,7 +42,7 @@ export async function GET(
       request.nextUrl.searchParams.get("businessId")?.trim() ?? "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -28,38 +53,24 @@ export async function GET(
       );
     }
 
-    const business = await prisma.business.findFirst({
-      where: {
-        id: businessId,
-        isActive: true,
-      },
-
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
+    const { business } = await requireBusinessAccess(businessId, [
+      "OWNER",
+      "ADMIN",
+      "RECEPTIONIST",
+    ]);
 
     const customer = await prisma.customer.findFirst({
       where: {
         id,
-        businessId,
+        businessId: business.id,
       },
 
       include: {
         reservations: {
+          where: {
+            businessId: business.id,
+          },
+
           orderBy: [
             {
               createdAt: "desc",
@@ -71,6 +82,14 @@ export async function GET(
 
           include: {
             services: {
+              where: {
+                service: {
+                  is: {
+                    businessId: business.id,
+                  },
+                },
+              },
+
               include: {
                 service: {
                   select: {
@@ -81,6 +100,14 @@ export async function GET(
                 },
 
                 resources: {
+                  where: {
+                    resource: {
+                      is: {
+                        businessId: business.id,
+                      },
+                    },
+                  },
+
                   include: {
                     resource: {
                       select: {
@@ -99,7 +126,7 @@ export async function GET(
     });
 
     if (!customer) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Cliente no encontrado para este negocio",
@@ -167,7 +194,7 @@ export async function GET(
       0,
     );
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -197,9 +224,22 @@ export async function GET(
       reservations,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/customers/[id] error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener el cliente",
@@ -238,7 +278,7 @@ export async function PATCH(
     const phone = typeof body.phone === "string" ? body.phone.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -250,7 +290,7 @@ export async function PATCH(
     }
 
     if (!firstName || !lastName) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Nombre y apellido son obligatorios",
@@ -261,33 +301,16 @@ export async function PATCH(
       );
     }
 
-    const business = await prisma.business.findFirst({
-      where: {
-        id: businessId,
-        isActive: true,
-      },
-
-      select: {
-        id: true,
-      },
-    });
-
-    if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
+    const { business } = await requireBusinessAccess(businessId, [
+      "OWNER",
+      "ADMIN",
+      "RECEPTIONIST",
+    ]);
 
     const existingCustomer = await prisma.customer.findFirst({
       where: {
         id,
-        businessId,
+        businessId: business.id,
       },
 
       select: {
@@ -296,7 +319,7 @@ export async function PATCH(
     });
 
     if (!existingCustomer) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Cliente no encontrado para este negocio",
@@ -310,6 +333,7 @@ export async function PATCH(
     const customer = await prisma.customer.update({
       where: {
         id,
+        businessId: business.id,
       },
 
       data: {
@@ -334,15 +358,43 @@ export async function PATCH(
       },
     });
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       customer,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2025"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error: "Cliente no encontrado para este negocio",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
     console.error("PATCH /api/customers/[id] error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible actualizar el cliente",

@@ -2,6 +2,30 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
 type CustomerSearchRow = {
   id: string;
 
@@ -28,7 +52,7 @@ export async function GET(request: NextRequest) {
     const rawLimit = Number(searchParams.get("limit") ?? 10);
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -40,7 +64,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 50) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "limit debe ser un entero entre 1 y 50",
@@ -51,29 +75,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const business = await prisma.business.findFirst({
-      where: {
-        id: businessId,
-        isActive: true,
-      },
-
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
-      );
-    }
+    const { business } = await requireBusinessAccess(businessId, [
+      "OWNER",
+      "ADMIN",
+      "RECEPTIONIST",
+    ]);
 
     /*
      * Búsqueda tolerante para recepción.
@@ -121,6 +127,7 @@ export async function GET(request: NextRequest) {
             SELECT COUNT(*)::int
             FROM "Reservation" reservation
             WHERE reservation."customerId" = customer.id
+              AND reservation."businessId" = ${business.id}
           ) AS "reservationCount",
 
           customer."createdAt",
@@ -129,7 +136,7 @@ export async function GET(request: NextRequest) {
         FROM "Customer" customer
 
         WHERE
-          customer."businessId" = ${businessId}
+          customer."businessId" = ${business.id}
 
           AND NOT EXISTS (
             SELECT 1
@@ -166,7 +173,7 @@ export async function GET(request: NextRequest) {
         LIMIT ${rawLimit}
       `;
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -192,9 +199,22 @@ export async function GET(request: NextRequest) {
       })),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/customers error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener los clientes",
