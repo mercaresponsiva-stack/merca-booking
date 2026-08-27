@@ -56,6 +56,7 @@ model Business {
   payments     Payment[]
   blocks       Block[]
   users        User[]
+  memberships  BusinessMembership[]
 
   refundPolicies     RefundPolicy[]
   cancellations      Cancellation[]
@@ -759,7 +760,8 @@ model Block {
 // ─────────────────────────────────────────────
 
 model User {
-  id         String @id @default(cuid())
+  id         String  @id @default(cuid())
+  authUserId String? @unique @db.Uuid
   businessId String
 
   name  String
@@ -772,7 +774,8 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  business    Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  memberships BusinessMembership[]
 
   verifiedPayments Payment[] @relation("PaymentVerifiedBy")
 
@@ -784,6 +787,27 @@ model User {
 
   @@unique([businessId, email])
   @@index([businessId])
+}
+
+// BUSINESS MEMBERSHIP
+// Rol y acceso de un usuario dentro de cada negocio.
+model BusinessMembership {
+  businessId String
+  userId     String
+
+  role UserRole @default(RECEPTIONIST)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([businessId, userId])
+  @@index([userId, isActive])
+  @@index([businessId, role, isActive])
 }
 
 // ─────────────────────────────────────────────
