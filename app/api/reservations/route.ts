@@ -621,7 +621,10 @@ export async function POST(request: NextRequest) {
      * La migración conservó los IDs originales,
      * así que ambos funcionan durante la transición.
      */
-    const businessId = body.businessId ?? body.hotelId;
+    const rawBusinessId = body.businessId ?? body.hotelId;
+
+    const businessId =
+      typeof rawBusinessId === "string" ? rawBusinessId.trim() : "";
 
     const serviceId = body.serviceId ?? body.roomTypeId;
 
@@ -667,7 +670,7 @@ export async function POST(request: NextRequest) {
     const rawOptions = body.options ?? [];
 
     if (!Array.isArray(rawOptions)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "options debe ser un arreglo",
@@ -686,7 +689,7 @@ export async function POST(request: NextRequest) {
         rawOption === null ||
         Array.isArray(rawOption)
       ) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Cada opción debe ser un objeto válido",
@@ -713,7 +716,7 @@ export async function POST(request: NextRequest) {
         !Number.isInteger(optionalQuantity) ||
         optionalQuantity < 1
       ) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error:
@@ -745,7 +748,7 @@ export async function POST(request: NextRequest) {
         hasOptionStartAt !==
         hasOptionEndAt
       ) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error:
@@ -773,7 +776,7 @@ export async function POST(request: NextRequest) {
           typeof rawOptionEndAt !==
             "string"
         ) {
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -805,7 +808,7 @@ export async function POST(request: NextRequest) {
           optionEndAt <=
             optionStartAt
         ) {
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -841,7 +844,7 @@ export async function POST(request: NextRequest) {
       !checkOut ||
       (!customerId && (!firstName || !lastName))
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Faltan campos obligatorios",
@@ -853,7 +856,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!paymentOption || !PAYMENT_OPTIONS.includes(paymentOption)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -866,7 +869,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!RESERVATION_SOURCES.includes(source)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El origen de la reserva no es válido",
@@ -882,7 +885,7 @@ export async function POST(request: NextRequest) {
     // ─────────────────────────────────────────────
 
     if (!isValidDateOnly(checkIn) || !isValidDateOnly(checkOut)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Formato de fecha inválido. Usa YYYY-MM-DD.",
@@ -903,7 +906,7 @@ export async function POST(request: NextRequest) {
       adults < 1 ||
       children < 0
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Cantidad de huéspedes inválida",
@@ -920,9 +923,15 @@ export async function POST(request: NextRequest) {
     // 4. BUSINESS
     // ─────────────────────────────────────────────
 
+    const access = await requireBusinessAccess(businessId, [
+      "OWNER",
+      "ADMIN",
+      "RECEPTIONIST",
+    ]);
+
     const business = await prisma.business.findFirst({
       where: {
-        id: businessId,
+        id: access.business.id,
         isActive: true,
       },
       select: {
@@ -939,14 +948,10 @@ export async function POST(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado o inactivo",
-        },
-        {
-          status: 404,
-        },
+      throw new AuthorizationError(
+        403,
+        "BUSINESS_ACCESS_DENIED",
+        "No tienes acceso activo a este negocio.",
       );
     }
 
@@ -979,7 +984,7 @@ export async function POST(request: NextRequest) {
     );
 
     if (endAt <= startAt) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La fecha de salida debe ser posterior a la fecha de entrada",
@@ -1605,7 +1610,7 @@ export async function POST(request: NextRequest) {
 
     const reservation = result.reservation;
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
 
@@ -1737,6 +1742,19 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     /*
      * Inventario insuficiente detectado
      * durante la validación prospectiva.
@@ -1749,7 +1767,7 @@ export async function POST(request: NextRequest) {
       error.message ===
         "PROSPECTIVE_INVENTORY_NOT_AVAILABLE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1780,7 +1798,7 @@ export async function POST(request: NextRequest) {
         "INVALID_OPTION_BILLING_UNITS",
       ].includes(error.message)
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1811,7 +1829,7 @@ export async function POST(request: NextRequest) {
         "SERVICE_OPTION_NOT_AVAILABLE_DURING_BOOKING",
       ].includes(error.message)
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1826,7 +1844,7 @@ export async function POST(request: NextRequest) {
     console.error("POST /api/reservations error:", error);
 
     if (error instanceof Error && error.message === "SERVICE_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Servicio no encontrado",
@@ -1838,7 +1856,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (error instanceof Error && error.message === "CUSTOMER_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Cliente no encontrado para este negocio",
@@ -1853,7 +1871,7 @@ export async function POST(request: NextRequest) {
       error instanceof Error &&
       error.message === "SERVICE_CAPACITY_EXCEEDED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1866,7 +1884,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (error instanceof Error && error.message === "RATE_NOT_AVAILABLE") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1882,7 +1900,7 @@ export async function POST(request: NextRequest) {
       error instanceof Error &&
       error.message === "SERVICE_RESOURCE_NOT_CONFIGURED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El servicio no tiene recursos configurados",
@@ -1894,7 +1912,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (error instanceof Error && error.message === "SERVICE_NOT_AVAILABLE") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El servicio ya no está disponible para esas fechas",
@@ -1920,7 +1938,7 @@ export async function POST(request: NextRequest) {
       "code" in error &&
       error.code === "P2034"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1932,7 +1950,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible crear la reserva",
