@@ -38,14 +38,13 @@ export class AuthorizationError extends Error {
 }
 
 /**
- * El negocio solicitado siempre se comprueba contra una membresía real.
- * allowedRoles debe definirse en código del servidor, nunca desde el cliente.
- * No se comparten sesiones ni resultados entre solicitudes.
+ * Comprueba la sesión con Supabase Auth desde el servidor.
+ * authUserId es el UUID de Auth, no el User.id usado por la auditoría.
+ * Tener sesión no concede por sí solo acceso a ningún negocio.
  */
-export async function requireBusinessAccess(
-  businessId: string,
-  allowedRoles?: readonly UserRole[],
-): Promise<BusinessAccess> {
+export async function requireAuthenticatedUser(): Promise<{
+  authUserId: string;
+}> {
   try {
     const supabase = await createClient();
 
@@ -80,6 +79,34 @@ export async function requireBusinessAccess(
       );
     }
 
+    return {
+      authUserId: data.user.id,
+    };
+  } catch (error) {
+    if (error instanceof AuthorizationError) {
+      throw error;
+    }
+
+    throw new AuthorizationError(
+      503,
+      "AUTHORIZATION_UNAVAILABLE",
+      "No fue posible validar el acceso en este momento.",
+    );
+  }
+}
+
+/**
+ * El negocio solicitado siempre se comprueba contra una membresía real.
+ * allowedRoles debe definirse en código del servidor, nunca desde el cliente.
+ * No se comparten sesiones ni resultados entre solicitudes.
+ */
+export async function requireBusinessAccess(
+  businessId: string,
+  allowedRoles?: readonly UserRole[],
+): Promise<BusinessAccess> {
+  try {
+    const { authUserId } = await requireAuthenticatedUser();
+
     if (
       typeof businessId !== "string" ||
       businessId.trim().length === 0
@@ -99,7 +126,7 @@ export async function requireBusinessAccess(
 
           user: {
             is: {
-              authUserId: data.user.id,
+              authUserId,
               isActive: true,
             },
           },

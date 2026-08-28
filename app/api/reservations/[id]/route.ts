@@ -14,6 +14,31 @@ import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -22,11 +47,79 @@ type RouteContext = {
 
 export async function GET(_request: Request, context: RouteContext) {
   try {
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
-    const reservation = await prisma.reservation.findUnique({
+    // Solo averiguamos el negocio; el detalle se carga después de autorizar.
+    const reservationScope = await prisma.reservation.findUnique({
       where: {
         id,
+      },
+      select: {
+        businessId: true,
+      },
+    });
+
+    if (!reservationScope) {
+      return privateJson(
+        { success: false, error: "Reserva no encontrada" },
+        { status: 404 },
+      );
+    }
+
+    const { business } = await requireBusinessAccess(
+      reservationScope.businessId,
+      ["OWNER", "ADMIN", "RECEPTIONIST"],
+    );
+
+    const recordScope = {
+      businessId: business.id,
+      reservationId: id,
+    };
+
+    const refundScope = {
+      ...recordScope,
+      payment: { is: recordScope },
+      AND: [
+        {
+          OR: [
+            { cancellationId: null },
+            { cancellation: { is: recordScope } },
+          ],
+        },
+        {
+          OR: [
+            { reservationChangeId: null },
+            { reservationChange: { is: recordScope } },
+          ],
+        },
+      ],
+    };
+
+    const resourceScope = {
+      reservationId: id,
+      resource: {
+        is: {
+          businessId: business.id,
+          OR: [
+            { resourceTypeId: null },
+            { resourceType: { is: { businessId: business.id } } },
+          ],
+        },
+      },
+    };
+
+    const reservation = await prisma.reservation.findFirst({
+      where: {
+        id,
+        businessId: business.id,
+        business: { is: { isActive: true } },
+        customer: { is: { businessId: business.id } },
+        OR: [
+          { cancellation: { is: null } },
+          { cancellation: { is: recordScope } },
+        ],
       },
 
       include: {
@@ -39,10 +132,15 @@ export async function GET(_request: Request, context: RouteContext) {
         customer: true,
 
         services: {
+          where: {
+            reservationId: id,
+            service: { is: { businessId: business.id } },
+          },
           include: {
             service: true,
 
             resources: {
+              where: resourceScope,
               include: {
                 resource: {
                   include: {
@@ -54,9 +152,25 @@ export async function GET(_request: Request, context: RouteContext) {
           },
         },
 
+        // Los snapshots siguen visibles aunque su configuración se elimine.
         options: {
+          where: {
+            reservationId: id,
+            OR: [
+              { reservationServiceId: null },
+              {
+                reservationService: {
+                  is: {
+                    reservationId: id,
+                    service: { is: { businessId: business.id } },
+                  },
+                },
+              },
+            ],
+          },
           include: {
             resources: {
+              where: resourceScope,
               include: {
                 resource: {
                   include: {
@@ -66,47 +180,28 @@ export async function GET(_request: Request, context: RouteContext) {
               },
             },
           },
-
           orderBy: {
             createdAt: "asc",
           },
         },
 
         payments: {
+          where: recordScope,
           include: {
-            verifiedBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            },
-
             refunds: {
-              include: {
-                processedBy: {
-                  select: {
-                    id: true,
-                    name: true,
-                    email: true,
-                    role: true,
-                  },
-                },
-              },
-
+              where: refundScope,
               orderBy: {
                 requestedAt: "desc",
               },
             },
           },
-
           orderBy: {
             createdAt: "desc",
           },
         },
 
         refunds: {
+          where: refundScope,
           include: {
             payment: {
               select: {
@@ -117,16 +212,6 @@ export async function GET(_request: Request, context: RouteContext) {
                 paidAt: true,
               },
             },
-
-            processedBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            },
-
             cancellation: {
               select: {
                 id: true,
@@ -134,7 +219,6 @@ export async function GET(_request: Request, context: RouteContext) {
                 reason: true,
               },
             },
-
             reservationChange: {
               select: {
                 id: true,
@@ -143,37 +227,18 @@ export async function GET(_request: Request, context: RouteContext) {
               },
             },
           },
-
           orderBy: {
             requestedAt: "desc",
           },
         },
 
-        cancellation: {
-          include: {
-            createdBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            },
-          },
-        },
+        cancellation: true,
 
         changes: {
+          where: recordScope,
           include: {
-            changedBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            },
-
             refunds: {
+              where: refundScope,
               select: {
                 id: true,
                 basis: true,
@@ -182,7 +247,6 @@ export async function GET(_request: Request, context: RouteContext) {
               },
             },
           },
-
           orderBy: {
             createdAt: "desc",
           },
@@ -191,15 +255,58 @@ export async function GET(_request: Request, context: RouteContext) {
     });
 
     if (!reservation) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Reserva no encontrada",
-        },
-        {
-          status: 404,
-        },
+      return privateJson(
+        { success: false, error: "Reserva no encontrada" },
+        { status: 404 },
       );
+    }
+
+    // No exigimos actividad actual para mostrar una identidad histórica.
+    // El vínculo legado solo limita esta lectura, nunca autoriza la solicitud.
+    const auditUserIds = new Set<string>();
+
+    function addAuditUserId(userId: string | null) {
+      if (userId) auditUserIds.add(userId);
+    }
+
+    for (const payment of reservation.payments) {
+      addAuditUserId(payment.verifiedById);
+      for (const refund of payment.refunds) {
+        addAuditUserId(refund.processedById);
+      }
+    }
+    for (const refund of reservation.refunds) {
+      addAuditUserId(refund.processedById);
+    }
+    if (reservation.cancellation) {
+      addAuditUserId(reservation.cancellation.createdById);
+    }
+    for (const change of reservation.changes) {
+      addAuditUserId(change.changedById);
+    }
+
+    const auditUsers = auditUserIds.size > 0
+      ? await prisma.user.findMany({
+          where: {
+            id: { in: [...auditUserIds] },
+            OR: [
+              { businessId: business.id },
+              { memberships: { some: { businessId: business.id } } },
+            ],
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+          },
+        })
+      : [];
+
+    const auditUsersById = new Map(auditUsers.map((user) => [user.id, user]));
+
+    function getAuditUser(userId: string | null) {
+      return userId ? auditUsersById.get(userId) ?? null : null;
     }
 
     // ─────────────────────────────────────────────
@@ -224,7 +331,7 @@ export async function GET(_request: Request, context: RouteContext) {
     // RESPONSE
     // ─────────────────────────────────────────────
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -514,7 +621,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
         verifiedAt: payment.verifiedAt,
 
-        verifiedBy: payment.verifiedBy,
+        verifiedBy: getAuditUser(payment.verifiedById),
 
         paidAt: payment.paidAt,
 
@@ -539,7 +646,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
           externalReference: refund.externalReference,
 
-          processedBy: refund.processedBy,
+          processedBy: getAuditUser(refund.processedById),
         })),
       })),
 
@@ -583,7 +690,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
         externalReference: refund.externalReference,
 
-        processedBy: refund.processedBy,
+        processedBy: getAuditUser(refund.processedById),
 
         payment: {
           id: refund.payment.id,
@@ -614,7 +721,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
             cancelledAt: reservation.cancellation.cancelledAt,
 
-            createdBy: reservation.cancellation.createdBy,
+            createdBy: getAuditUser(reservation.cancellation.createdById),
           }
         : null,
 
@@ -649,7 +756,7 @@ export async function GET(_request: Request, context: RouteContext) {
 
         details: change.details,
 
-        changedBy: change.changedBy,
+        changedBy: getAuditUser(change.changedById),
 
         refunds: change.refunds.map((refund) => ({
           id: refund.id,
@@ -665,9 +772,16 @@ export async function GET(_request: Request, context: RouteContext) {
       })),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        { success: false, code: error.code, error: error.message },
+        { status: error.status },
+      );
+    }
+
     console.error("GET /api/reservations/[id] error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener la reserva",
