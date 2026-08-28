@@ -1,5 +1,6 @@
 import {
   confirmReservation,
+  RESERVATION_CONFIRMATION_ALLOWED_ROLES,
 } from "@/lib/booking/reservation-confirmation-operation";
 
 import {
@@ -12,6 +13,31 @@ import {
 } from "next/server";
 
 import { prisma } from "@/lib/prisma";
+
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
 
 function isJsonObject(
   value: unknown,
@@ -56,6 +82,8 @@ export async function POST(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const {
       id,
     } =
@@ -67,7 +95,7 @@ export async function POST(
       body =
         await request.json();
     } catch {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -90,7 +118,7 @@ export async function POST(
         body,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -108,31 +136,7 @@ export async function POST(
       );
     }
 
-    const changedByIdValue =
-      body.changedById;
-
-    if (
-      typeof changedByIdValue !==
-        "string" ||
-      !changedByIdValue.trim()
-    ) {
-      return NextResponse.json(
-        {
-          success:
-            false,
-
-          code:
-            "CONFIRMATION_CHANGED_BY_REQUIRED",
-
-          error:
-            "Debes indicar el usuario que confirma la reserva.",
-        },
-        {
-          status:
-            400,
-        },
-      );
-    }
+    // El changedById recibido por compatibilidad no se usa para la auditoría.
 
     const reasonValue =
       body.reason;
@@ -145,7 +149,7 @@ export async function POST(
       typeof reasonValue !==
         "string"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -175,7 +179,7 @@ export async function POST(
       reason.trim().length >
         RESERVATION_CONFIRMATION_REASON_MAX_LENGTH
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -193,6 +197,21 @@ export async function POST(
       );
     }
 
+    // Solo averiguamos el negocio antes de autorizar la operación.
+    const reservationScope = await prisma.reservation.findUnique({
+      where: { id },
+      select: { businessId: true },
+    });
+
+    if (!reservationScope) {
+      throw new Error("RESERVATION_NOT_FOUND");
+    }
+
+    const access = await requireBusinessAccess(
+      reservationScope.businessId,
+      RESERVATION_CONFIRMATION_ALLOWED_ROLES,
+    );
+
     const confirmedAt =
       new Date();
 
@@ -205,8 +224,11 @@ export async function POST(
             reservationId:
               id,
 
+            businessId:
+              access.business.id,
+
             changedById:
-              changedByIdValue.trim(),
+              access.user.id,
 
             reason,
 
@@ -222,7 +244,7 @@ export async function POST(
         },
       );
 
-    return NextResponse.json({
+    return privateJson({
       success:
         true,
 
@@ -231,13 +253,21 @@ export async function POST(
   } catch (
     error
   ) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        { success: false, code: error.code, error: error.message },
+        { status: error.status },
+      );
+    }
+
     if (
-      error instanceof
-        Error &&
-      error.message ===
-        "RESERVATION_NOT_FOUND"
+      (
+        error instanceof Error &&
+        error.message === "RESERVATION_NOT_FOUND"
+      ) ||
+      hasPrismaErrorCode(error, "P2025")
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -261,7 +291,7 @@ export async function POST(
       error.message ===
         "CONFIRMATION_ACTOR_NOT_VALID"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -270,7 +300,7 @@ export async function POST(
             "CONFIRMATION_ACTOR_NOT_VALID",
 
           error:
-            "El usuario que confirma la reserva no existe, está inactivo o pertenece a otro negocio.",
+            "El usuario que confirma la reserva no tiene una membresía activa con un rol permitido en este negocio.",
         },
         {
           status:
@@ -285,7 +315,7 @@ export async function POST(
       error.message ===
         "RESERVATION_NOT_ELIGIBLE_FOR_CONFIRMATION"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -309,7 +339,7 @@ export async function POST(
       error.message ===
         "INITIAL_PAYMENT_REQUIRED_FOR_CONFIRMATION"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -333,7 +363,7 @@ export async function POST(
       error.message ===
         "INVALID_CONFIRMATION_REASON"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -362,7 +392,7 @@ export async function POST(
         error,
       );
 
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -386,7 +416,7 @@ export async function POST(
         "P2034",
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -409,7 +439,7 @@ export async function POST(
       error,
     );
 
-    return NextResponse.json(
+    return privateJson(
       {
         success:
           false,

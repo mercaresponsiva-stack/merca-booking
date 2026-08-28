@@ -12,18 +12,27 @@ import {
 
 import { prisma } from "@/lib/prisma";
 
+export const RESERVATION_CONFIRMATION_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
 export type ReservationConfirmationDb =
   Pick<
     typeof prisma,
+    | "businessMembership"
     | "payment"
     | "reservation"
     | "reservationChange"
     | "reservationResource"
-    | "user"
   >;
 
 type ConfirmReservationInput = {
   reservationId: string;
+
+  // Negocio y actor obtenidos de la autorización del servidor.
+  businessId: string;
 
   changedById: string;
 
@@ -45,7 +54,7 @@ type ConfirmReservationInput = {
  *
  * - cambia únicamente PENDING a CONFIRMED
  * - vuelve a calcular el estado financiero
- * - valida al actor dentro del negocio
+ * - valida la membresía activa del actor dentro del negocio
  * - conserva fechas, precios y recursos
  * - registra una auditoría CONFIRMATION
  *
@@ -56,6 +65,8 @@ type ConfirmReservationInput = {
  */
 export async function confirmReservation({
   reservationId,
+
+  businessId,
 
   changedById,
 
@@ -80,11 +91,27 @@ export async function confirmReservation({
     );
   }
 
+  // Evitamos que un identificador ausente omita accidentalmente un filtro.
+  if (
+    typeof reservationId !== "string" ||
+    !reservationId.trim() ||
+    typeof businessId !== "string" ||
+    !businessId.trim()
+  ) {
+    throw new Error("RESERVATION_NOT_FOUND");
+  }
+
+  if (typeof changedById !== "string" || !changedById.trim()) {
+    throw new Error("CONFIRMATION_ACTOR_NOT_VALID");
+  }
+
   const reservation =
-    await db.reservation.findUnique({
+    await db.reservation.findFirst({
       where: {
         id:
           reservationId,
+
+        businessId,
       },
 
       select: {
@@ -135,41 +162,38 @@ export async function confirmReservation({
   }
 
   /*
-   * El actor debe existir, estar activo y
-   * pertenecer al mismo negocio.
+   * Revalidamos la membresía dentro de la misma transacción.
+   * User.businessId y User.role no conceden acceso a esta operación.
    */
-  const actor =
-    await db.user.findFirst({
-      where: {
-        id:
-          changedById,
-
-        businessId:
-          reservation.businessId,
-
-        isActive:
-          true,
+  const actorMembership = await db.businessMembership.findFirst({
+    where: {
+      businessId,
+      userId: changedById,
+      isActive: true,
+      role: { in: [...RESERVATION_CONFIRMATION_ALLOWED_ROLES] },
+      user: { is: { isActive: true } },
+      business: { is: { isActive: true } },
+    },
+    select: {
+      role: true,
+      user: {
+        select: {
+          id: true,
+          name: true,
+        },
       },
+    },
+  });
 
-      select: {
-        id:
-          true,
-
-        name:
-          true,
-
-        role:
-          true,
-      },
-    });
-
-  if (
-    !actor
-  ) {
-    throw new Error(
-      "CONFIRMATION_ACTOR_NOT_VALID",
-    );
+  if (!actorMembership) {
+    throw new Error("CONFIRMATION_ACTOR_NOT_VALID");
   }
+
+  const actor = {
+    id: actorMembership.user.id,
+    name: actorMembership.user.name,
+    role: actorMembership.role,
+  };
 
   /*
    * Recalculamos los pagos dentro de la
@@ -181,6 +205,8 @@ export async function confirmReservation({
       where: {
         reservationId:
           reservation.id,
+
+        businessId,
       },
 
       select: {
@@ -191,6 +217,11 @@ export async function confirmReservation({
           true,
 
         refunds: {
+          where: {
+            businessId,
+            reservationId: reservation.id,
+          },
+
           select: {
             amount:
               true,
@@ -242,6 +273,23 @@ export async function confirmReservation({
       where: {
         reservationId:
           reservation.id,
+
+        resource: { is: { businessId } },
+
+        AND: [
+          {
+            OR: [
+              { reservationServiceId: null },
+              { reservationService: { is: { reservationId: reservation.id } } },
+            ],
+          },
+          {
+            OR: [
+              { reservationOptionId: null },
+              { reservationOption: { is: { reservationId: reservation.id } } },
+            ],
+          },
+        ],
       },
 
       select: {
@@ -408,6 +456,8 @@ export async function confirmReservation({
       where: {
         id:
           reservation.id,
+
+        businessId,
       },
 
       data: {
