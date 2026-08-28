@@ -23,6 +23,30 @@ import { prisma } from "@/lib/prisma";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
 
+import {
+  AuthorizationError,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
 const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
 
 type PaymentOption = (typeof PAYMENT_OPTIONS)[number];
@@ -83,7 +107,7 @@ export async function GET(request: NextRequest) {
     // ─────────────────────────────────────────────
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -96,7 +120,7 @@ export async function GET(request: NextRequest) {
 
     if (rawStatus) {
       if (!isReservationStatus(rawStatus)) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Estado de reserva inválido",
@@ -111,7 +135,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (from && !isValidDateOnly(from)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El parámetro from debe usar formato YYYY-MM-DD",
@@ -123,7 +147,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (to && !isValidDateOnly(to)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El parámetro to debe usar formato YYYY-MM-DD",
@@ -135,7 +159,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (from && to && from > to) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "from no puede ser posterior a to",
@@ -147,7 +171,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!Number.isInteger(rawPage) || rawPage < 1) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "page debe ser un entero mayor o igual a 1",
@@ -163,7 +187,7 @@ export async function GET(request: NextRequest) {
       rawPageSize < 1 ||
       rawPageSize > 100
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "pageSize debe ser un entero entre 1 y 100",
@@ -178,9 +202,16 @@ export async function GET(request: NextRequest) {
     // BUSINESS
     // ─────────────────────────────────────────────
 
-    const business = await prisma.business.findUnique({
+    const access = await requireBusinessAccess(businessId, [
+      "OWNER",
+      "ADMIN",
+      "RECEPTIONIST",
+    ]);
+
+    const business = await prisma.business.findFirst({
       where: {
-        id: businessId,
+        id: access.business.id,
+        isActive: true,
       },
 
       select: {
@@ -193,14 +224,10 @@ export async function GET(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Negocio no encontrado",
-        },
-        {
-          status: 404,
-        },
+      throw new AuthorizationError(
+        403,
+        "BUSINESS_ACCESS_DENIED",
+        "No tienes acceso activo a este negocio.",
       );
     }
 
@@ -250,7 +277,7 @@ export async function GET(request: NextRequest) {
     // ─────────────────────────────────────────────
 
     const where = {
-      businessId,
+      businessId: business.id,
 
       ...(status
         ? {
@@ -300,11 +327,16 @@ export async function GET(request: NextRequest) {
           }
         : {}),
 
-      ...(dateConditions.length > 0
-        ? {
-            AND: dateConditions,
-          }
-        : {}),
+      AND: [
+        {
+          customer: {
+            is: {
+              businessId: business.id,
+            },
+          },
+        },
+        ...dateConditions,
+      ],
     };
 
     // ─────────────────────────────────────────────
@@ -346,6 +378,14 @@ export async function GET(request: NextRequest) {
           customer: true,
 
           services: {
+            where: {
+              service: {
+                is: {
+                  businessId: business.id,
+                },
+              },
+            },
+
             include: {
               service: {
                 select: {
@@ -356,6 +396,14 @@ export async function GET(request: NextRequest) {
               },
 
               resources: {
+                where: {
+                  resource: {
+                    is: {
+                      businessId: business.id,
+                    },
+                  },
+                },
+
                 include: {
                   resource: {
                     select: {
@@ -370,8 +418,16 @@ export async function GET(request: NextRequest) {
           },
 
           payments: {
+            where: {
+              businessId: business.id,
+            },
+
             include: {
-              refunds: true,
+              refunds: {
+                where: {
+                  businessId: business.id,
+                },
+              },
             },
 
             orderBy: {
@@ -489,7 +545,7 @@ export async function GET(request: NextRequest) {
 
     const totalPages = totalItems === 0 ? 0 : Math.ceil(totalItems / pageSize);
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -520,9 +576,22 @@ export async function GET(request: NextRequest) {
       items,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/reservations error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener las reservas",
