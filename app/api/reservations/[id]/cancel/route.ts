@@ -3,6 +3,41 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
 import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const CANCELLATION_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+import {
   getElapsedFullDays,
   resolveCancellationBasis,
   type CancellationInitiator,
@@ -27,9 +62,39 @@ type RouteContext = {
 
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
+    await requireAuthenticatedUser();
+
     const { id: reservationId } = await context.params;
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud no contiene JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const initiator = body.initiator as CancellationInitiator | undefined;
 
@@ -39,23 +104,16 @@ export async function POST(request: NextRequest, context: RouteContext) {
         : null;
 
     /*
-     * Temporalmente lo recibimos en body.
-     *
-     * Cuando exista autenticación administrativa,
-     * este ID deberá venir de la sesión y no del
-     * cliente HTTP.
+     * createdById puede seguir llegando por compatibilidad,
+     * pero la auditoría siempre usa el usuario de la sesión.
      */
-    const createdById =
-      typeof body.createdById === "string" && body.createdById.trim()
-        ? body.createdById.trim()
-        : null;
 
     // ─────────────────────────────────────────────
     // 1. INPUT
     // ─────────────────────────────────────────────
 
     if (!initiator || !CANCELLATION_INITIATORS.includes(initiator)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "initiator debe ser CUSTOMER o PROVIDER",
@@ -66,22 +124,24 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    /*
-     * Si el negocio está iniciando la cancelación,
-     * exigimos trazabilidad del usuario que
-     * ejecutó la acción.
-     */
-    if (initiator === "PROVIDER" && !createdById) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Las cancelaciones del proveedor requieren createdById",
-        },
-        {
-          status: 400,
-        },
-      );
+    // Solo obtenemos el negocio antes de autorizar la operación.
+    const reservationScope = await prisma.reservation.findUnique({
+      where: {
+        id: reservationId,
+      },
+      select: {
+        businessId: true,
+      },
+    });
+
+    if (!reservationScope) {
+      throw new Error("RESERVATION_NOT_FOUND");
     }
+
+    const access = await requireBusinessAccess(
+      reservationScope.businessId,
+      CANCELLATION_ALLOWED_ROLES,
+    );
 
     const requestedAt = new Date();
 
@@ -95,13 +155,20 @@ export async function POST(request: NextRequest, context: RouteContext) {
         // RESERVATION
         // ─────────────────────────────────────────
 
-        const reservation = await tx.reservation.findUnique({
+        const reservation = await tx.reservation.findFirst({
           where: {
             id: reservationId,
+            businessId: access.business.id,
           },
 
           include: {
-            cancellation: true,
+            cancellation: {
+              select: {
+                id: true,
+                businessId: true,
+                reservationId: true,
+              },
+            },
 
             payments: {
               where: {
@@ -118,6 +185,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
                   select: {
                     id: true,
+                    businessId: true,
+                    reservationId: true,
+                    paymentId: true,
                     baseAmount: true,
                     amount: true,
                     status: true,
@@ -135,6 +205,16 @@ export async function POST(request: NextRequest, context: RouteContext) {
         // ─────────────────────────────────────────
         // EXISTING CANCELLATION
         // ─────────────────────────────────────────
+
+        if (
+          reservation.cancellation &&
+          (
+            reservation.cancellation.businessId !== access.business.id ||
+            reservation.cancellation.reservationId !== reservation.id
+          )
+        ) {
+          throw new Error("CANCELLATION_RECORD_SCOPE_INVALID");
+        }
 
         if (reservation.cancellation) {
           throw new Error("RESERVATION_ALREADY_CANCELLED");
@@ -156,25 +236,47 @@ export async function POST(request: NextRequest, context: RouteContext) {
         // ACTOR
         // ─────────────────────────────────────────
 
-        if (createdById) {
-          const actor = await tx.user.findFirst({
-            where: {
-              id: createdById,
-
-              businessId: reservation.businessId,
-
-              isActive: true,
+        const actorMembership = await tx.businessMembership.findFirst({
+          where: {
+            businessId: access.business.id,
+            userId: access.user.id,
+            isActive: true,
+            role: {
+              in: [...CANCELLATION_ALLOWED_ROLES],
             },
-
-            select: {
-              id: true,
+            user: {
+              is: {
+                isActive: true,
+              },
             },
-          });
+            business: {
+              is: {
+                isActive: true,
+              },
+            },
+          },
+          select: {
+            role: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+        });
 
-          if (!actor) {
-            throw new Error("CANCELLATION_ACTOR_NOT_VALID");
-          }
+        if (!actorMembership) {
+          throw new Error("CANCELLATION_ACTOR_NOT_VALID");
         }
+
+        const actor = {
+          id: actorMembership.user.id,
+          name: actorMembership.user.name,
+          email: actorMembership.user.email,
+          role: actorMembership.role,
+        };
 
         // ─────────────────────────────────────────
         // REFUND POLICY
@@ -185,7 +287,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
         const refundPolicy = await tx.refundPolicy.findFirst({
           where: {
-            businessId: reservation.businessId,
+            businessId: access.business.id,
 
             isActive: true,
 
@@ -245,7 +347,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
         const cancellation = await tx.cancellation.create({
           data: {
-            businessId: reservation.businessId,
+            businessId: access.business.id,
 
             reservationId: reservation.id,
 
@@ -256,7 +358,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
             requestedAt,
             cancelledAt: requestedAt,
 
-            createdById,
+            createdById: actor.id,
           },
         });
 
@@ -274,6 +376,19 @@ export async function POST(request: NextRequest, context: RouteContext) {
         const createdRefundIds: string[] = [];
 
         for (const payment of reservation.payments) {
+          if (
+            payment.businessId !== access.business.id ||
+            payment.reservationId !== reservation.id ||
+            payment.refunds.some(
+              (refund) =>
+                refund.businessId !== access.business.id ||
+                refund.reservationId !== reservation.id ||
+                refund.paymentId !== payment.id,
+            )
+          ) {
+            throw new Error("CANCELLATION_FINANCIAL_SCOPE_INVALID");
+          }
+
           if (!payment.paidAt) {
             throw new Error("PAID_PAYMENT_MISSING_PAID_AT");
           }
@@ -332,7 +447,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
           const refund = await tx.refund.create({
             data: {
-              businessId: reservation.businessId,
+              businessId: access.business.id,
 
               reservationId: reservation.id,
 
@@ -381,6 +496,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         await tx.reservation.update({
           where: {
             id: reservation.id,
+            businessId: access.business.id,
           },
 
           data: {
@@ -392,22 +508,26 @@ export async function POST(request: NextRequest, context: RouteContext) {
         // COMPLETE RESULT
         // ─────────────────────────────────────────
 
-        const completeCancellation = await tx.cancellation.findUniqueOrThrow({
+        const completeCancellation = await tx.cancellation.findFirstOrThrow({
           where: {
             id: cancellation.id,
+            businessId: access.business.id,
+            reservationId: reservation.id,
           },
 
           include: {
-            createdBy: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            },
-
             refunds: {
+              where: {
+                businessId: access.business.id,
+                reservationId: reservation.id,
+                payment: {
+                  is: {
+                    businessId: access.business.id,
+                    reservationId: reservation.id,
+                  },
+                },
+              },
+
               include: {
                 payment: {
                   select: {
@@ -434,6 +554,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
           cancellation: completeCancellation,
 
+          actor,
+
           createdRefundIds,
         };
       },
@@ -447,7 +569,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     // 3. RESPONSE
     // ─────────────────────────────────────────────
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
 
@@ -470,7 +592,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
           cancelledAt: result.cancellation.cancelledAt,
 
-          createdBy: result.cancellation.createdBy,
+          createdBy: result.actor,
 
           refunds: result.cancellation.refunds.map((refund) => ({
             id: refund.id,
@@ -517,10 +639,31 @@ export async function POST(request: NextRequest, context: RouteContext) {
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("POST /api/reservations/[id]/cancel error:", error);
 
-    if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
-      return NextResponse.json(
+    if (
+      (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") ||
+      (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "P2025"
+      )
+    ) {
+      return privateJson(
         {
           success: false,
           error: "Reserva no encontrada",
@@ -535,7 +678,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "RESERVATION_ALREADY_CANCELLED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya fue cancelada",
@@ -550,7 +693,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "RESERVATION_CANNOT_BE_CANCELLED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya no puede cancelarse en su estado actual",
@@ -565,7 +708,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "CANCELLATION_AFTER_SERVICE_START"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -581,14 +724,33 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "CANCELLATION_ACTOR_NOT_VALID"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
-            "El usuario que procesa la cancelación no es válido para este negocio",
+            "El usuario que procesa la cancelación no tiene una membresía activa con un rol permitido en este negocio",
         },
         {
-          status: 400,
+          status: 403,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      [
+        "CANCELLATION_RECORD_SCOPE_INVALID",
+        "CANCELLATION_FINANCIAL_SCOPE_INVALID",
+      ].includes(error.message)
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "Los datos relacionados con la reserva no son consistentes con el negocio autorizado",
+        },
+        {
+          status: 500,
         },
       );
     }
@@ -597,7 +759,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "REFUND_POLICY_NOT_CONFIGURED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El negocio no tiene una política de reembolso activa",
@@ -612,7 +774,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       error instanceof Error &&
       error.message === "PAID_PAYMENT_MISSING_PAID_AT"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -635,7 +797,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       "code" in error &&
       error.code === "P2002"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya posee una cancelación registrada",
@@ -655,7 +817,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       "code" in error &&
       error.code === "P2034"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -667,7 +829,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible cancelar la reserva",
