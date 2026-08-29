@@ -7,6 +7,68 @@ import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const PAYMENT_UPDATE_ALLOWED_ROLES = ["OWNER", "ADMIN", "RECEPTIONIST"] as const;
+
+type FinancialScopeRefund = {
+  businessId: string;
+  reservationId: string;
+  paymentId: string;
+};
+
+type FinancialScopePayment = {
+  id: string;
+  businessId: string;
+  reservationId: string;
+  refunds: readonly FinancialScopeRefund[];
+};
+
+function hasPaymentFinancialScopeViolation(
+  payments: readonly FinancialScopePayment[],
+  businessId: string,
+  reservationId: string,
+) {
+  return payments.some(
+    (payment) =>
+      payment.businessId !== businessId ||
+      payment.reservationId !== reservationId ||
+      payment.refunds.some(
+        (refund) =>
+          refund.businessId !== businessId ||
+          refund.reservationId !== reservationId ||
+          refund.paymentId !== payment.id,
+      ),
+  );
+}
+
 export async function PATCH(
   request: NextRequest,
   context: {
@@ -17,9 +79,39 @@ export async function PATCH(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const { id, paymentId } = await context.params;
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud no contiene JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const status = body.status;
 
@@ -28,17 +120,15 @@ export async function PATCH(
         ? String(body.externalReference)
         : undefined;
 
-    const verifiedById =
-      body.verifiedById !== undefined && body.verifiedById !== null
-        ? String(body.verifiedById)
-        : null;
+    // verifiedById puede seguir llegando por compatibilidad,
+    // pero el servidor siempre utiliza al usuario de la sesión.
 
     // ─────────────────────────────────────────────
     // 1. VALIDAR STATUS
     // ─────────────────────────────────────────────
 
     if (!isPaymentTargetStatus(status)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Estado de pago inválido",
@@ -49,15 +139,34 @@ export async function PATCH(
       );
     }
 
+    const reservationScope = await prisma.reservation.findUnique({
+      where: {
+        id,
+      },
+      select: {
+        businessId: true,
+      },
+    });
+
+    if (!reservationScope) {
+      throw new Error("RESERVATION_NOT_FOUND");
+    }
+
+    const access = await requireBusinessAccess(
+      reservationScope.businessId,
+      PAYMENT_UPDATE_ALLOWED_ROLES,
+    );
+
     // ─────────────────────────────────────────────
     // 2. TRANSACTION
     // ─────────────────────────────────────────────
 
     const result = await prisma.$transaction(
       async (tx) => {
-        const reservation = await tx.reservation.findUnique({
+        const reservation = await tx.reservation.findFirst({
           where: {
             id,
+            businessId: access.business.id,
           },
 
           select: {
@@ -78,6 +187,48 @@ export async function PATCH(
           throw new Error("RESERVATION_NOT_FOUND");
         }
 
+        const actorMembership = await tx.businessMembership.findFirst({
+          where: {
+            businessId: access.business.id,
+            userId: access.user.id,
+            isActive: true,
+            role: {
+              in: [...PAYMENT_UPDATE_ALLOWED_ROLES],
+            },
+            user: {
+              is: {
+                isActive: true,
+              },
+            },
+            business: {
+              is: {
+                isActive: true,
+              },
+            },
+          },
+          select: {
+            role: true,
+            user: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+        if (!actorMembership) {
+          throw new Error("PAYMENT_ACTOR_NOT_VALID");
+        }
+
+        const actor = {
+          id: actorMembership.user.id,
+          name: actorMembership.user.name,
+          email: actorMembership.user.email,
+          role: actorMembership.role,
+        };
+
         // ───────────────────────────────────────
         // 3. PAYMENT
         // ───────────────────────────────────────
@@ -88,7 +239,7 @@ export async function PATCH(
 
             reservationId: reservation.id,
 
-            businessId: reservation.businessId,
+            businessId: access.business.id,
           },
         });
 
@@ -139,31 +290,7 @@ export async function PATCH(
           // ─────────────────────────────────────
 
           if (payment.method === "BANK_TRANSFER") {
-            if (!verifiedById) {
-              throw new Error("TRANSFER_VERIFIER_REQUIRED");
-            }
-
-            verifier = await tx.user.findFirst({
-              where: {
-                id: verifiedById,
-
-                businessId: reservation.businessId,
-
-                isActive: true,
-              },
-
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                role: true,
-              },
-            });
-
-            if (!verifier) {
-              throw new Error("PAYMENT_VERIFIER_NOT_FOUND");
-            }
-
+            verifier = actor;
             verificationDate = new Date();
           }
 
@@ -171,9 +298,38 @@ export async function PATCH(
           // PREVENIR SOBREPAGO
           // ─────────────────────────────────────
 
+          const financialRecords = await tx.payment.findMany({
+            where: {
+              reservationId: reservation.id,
+            },
+            select: {
+              id: true,
+              businessId: true,
+              reservationId: true,
+              refunds: {
+                select: {
+                  businessId: true,
+                  reservationId: true,
+                  paymentId: true,
+                },
+              },
+            },
+          });
+
+          if (
+            hasPaymentFinancialScopeViolation(
+              financialRecords,
+              access.business.id,
+              reservation.id,
+            )
+          ) {
+            throw new Error("PAYMENT_FINANCIAL_SCOPE_INVALID");
+          }
+
           const paidAggregate = await tx.payment.aggregate({
             where: {
               reservationId: reservation.id,
+              businessId: access.business.id,
 
               status: "PAID",
 
@@ -207,6 +363,8 @@ export async function PATCH(
         const updatedPayment = await tx.payment.update({
           where: {
             id: payment.id,
+            businessId: access.business.id,
+            reservationId: reservation.id,
           },
 
           data: {
@@ -274,6 +432,9 @@ export async function PATCH(
           include: {
             refunds: {
               select: {
+                businessId: true,
+                reservationId: true,
+                paymentId: true,
                 amount: true,
                 status: true,
               },
@@ -284,6 +445,16 @@ export async function PATCH(
             createdAt: "desc",
           },
         });
+
+        if (
+          hasPaymentFinancialScopeViolation(
+            payments,
+            access.business.id,
+            reservation.id,
+          )
+        ) {
+          throw new Error("PAYMENT_FINANCIAL_SCOPE_INVALID");
+        }
 
         const paymentSummary = calculatePaymentSummary({
           total: Number(reservation.total),
@@ -305,7 +476,7 @@ export async function PATCH(
       },
     );
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -325,10 +496,23 @@ export async function PATCH(
       paymentSummary: result.paymentSummary,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PATCH reservation payment error:", error);
 
     if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Reserva no encontrada",
@@ -340,7 +524,7 @@ export async function PATCH(
     }
 
     if (error instanceof Error && error.message === "PAYMENT_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Pago no encontrado para esta reserva",
@@ -353,9 +537,25 @@ export async function PATCH(
 
     if (
       error instanceof Error &&
+      error.message === "PAYMENT_ACTOR_NOT_VALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "El usuario que actualiza el pago no tiene una membresía activa con un rol permitido en este negocio",
+        },
+        {
+          status: 403,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
       error.message === "PAYMENT_STATUS_ALREADY_SET"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El pago ya tiene ese estado",
@@ -370,7 +570,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "INVALID_PAYMENT_TRANSITION"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La transición de estado del pago no está permitida",
@@ -382,7 +582,7 @@ export async function PATCH(
     }
 
     if (error instanceof Error && error.message === "RESERVATION_NOT_PAYABLE") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya no permite confirmar nuevos pagos",
@@ -395,41 +595,9 @@ export async function PATCH(
 
     if (
       error instanceof Error &&
-      error.message === "TRANSFER_VERIFIER_REQUIRED"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "Debes indicar verifiedById para confirmar una transferencia bancaria",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    if (
-      error instanceof Error &&
-      error.message === "PAYMENT_VERIFIER_NOT_FOUND"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "El usuario que verifica el pago no existe, está inactivo o no pertenece al negocio",
-        },
-        {
-          status: 400,
-        },
-      );
-    }
-
-    if (
-      error instanceof Error &&
       error.message === "PAYMENT_EXCEEDS_CURRENT_BALANCE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El pago supera el saldo pendiente actual de la reserva",
@@ -441,12 +609,28 @@ export async function PATCH(
     }
 
     if (
+      error instanceof Error &&
+      error.message === "PAYMENT_FINANCIAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "Los datos financieros de la reserva no son consistentes con el negocio autorizado",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
+    if (
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
       error.code === "P2034"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -458,7 +642,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible actualizar el pago",
