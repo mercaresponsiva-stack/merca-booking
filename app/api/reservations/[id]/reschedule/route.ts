@@ -36,6 +36,38 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set("Cache-Control", "private, no-store, max-age=0, must-revalidate");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const RESCHEDULE_UPDATE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
 export async function PATCH(
   request: NextRequest,
   context: {
@@ -45,21 +77,41 @@ export async function PATCH(
   },
 ) {
   try {
+    /*
+     * Autenticamos antes de consultar el alcance
+     * de cualquier reserva.
+     */
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
     // ─────────────────────────────────────────────
     // 1. BODY
     // ─────────────────────────────────────────────
 
-    let body: Record<string, unknown>;
+    let body: unknown;
 
     try {
-      body = (await request.json()) as Record<string, unknown>;
+      body = await request.json();
     } catch {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
-          error: "El cuerpo de la solicitud no es JSON válido",
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud no contiene JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error: "El cuerpo de la solicitud debe ser un objeto JSON válido.",
         },
         {
           status: 400,
@@ -73,15 +125,12 @@ export async function PATCH(
       typeof body.checkOut === "string" ? body.checkOut.trim() : "";
 
     /*
-     * Temporalmente recibimos el actor
-     * desde el body.
+     * changedById puede seguir llegando por
+     * compatibilidad con la interfaz actual.
      *
-     * Cuando integremos autenticación,
-     * changedById deberá provenir de
-     * la sesión y no del cliente.
+     * El servidor siempre utiliza al usuario
+     * autenticado y nunca confía en ese campo.
      */
-    const changedById =
-      typeof body.changedById === "string" ? body.changedById.trim() : "";
 
     const reason =
       typeof body.reason === "string" && body.reason.trim()
@@ -89,7 +138,7 @@ export async function PATCH(
         : null;
 
     if (!checkIn || !checkOut) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "checkIn y checkOut son requeridos",
@@ -101,7 +150,7 @@ export async function PATCH(
     }
 
     if (!isValidDateOnly(checkIn) || !isValidDateOnly(checkOut)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Formato de fecha inválido. Usa YYYY-MM-DD.",
@@ -112,17 +161,27 @@ export async function PATCH(
       );
     }
 
-    if (!changedById) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "changedById es requerido",
-        },
-        {
-          status: 400,
-        },
-      );
+    /*
+     * Resolvemos el negocio únicamente después
+     * de autenticar y validar el cuerpo.
+     */
+    const reservationScope = await prisma.reservation.findUnique({
+      where: {
+        id,
+      },
+      select: {
+        businessId: true,
+      },
+    });
+
+    if (!reservationScope) {
+      throw new Error("RESERVATION_NOT_FOUND");
     }
+
+    const access = await requireBusinessAccess(
+      reservationScope.businessId,
+      RESCHEDULE_UPDATE_ALLOWED_ROLES,
+    );
 
     /*
      * Un único instante para toda
@@ -140,9 +199,10 @@ export async function PATCH(
         // 3. RESERVATION CONTEXT
         // ───────────────────────────────────────
 
-        const reservation = await tx.reservation.findUnique({
+        const reservation = await tx.reservation.findFirst({
           where: {
             id,
+            businessId: access.business.id,
           },
 
           include: {
@@ -155,6 +215,8 @@ export async function PATCH(
             services: {
               select: {
                 id: true,
+
+                reservationId: true,
 
                 serviceId: true,
 
@@ -169,6 +231,14 @@ export async function PATCH(
             options: {
               select: {
                 id: true,
+
+                reservationId: true,
+
+                reservationServiceId: true,
+
+                optionId: true,
+
+                serviceOptionId: true,
 
                 includedQuantity: true,
 
@@ -196,6 +266,14 @@ export async function PATCH(
               include: {
                 refunds: {
                   select: {
+                    id: true,
+
+                    businessId: true,
+
+                    reservationId: true,
+
+                    paymentId: true,
+
                     baseAmount: true,
 
                     amount: true,
@@ -214,11 +292,41 @@ export async function PATCH(
               select: {
                 id: true,
 
+                businessId: true,
+
+                reservationId: true,
+
+                paymentId: true,
+
+                cancellationId: true,
+
+                reservationChangeId: true,
+
                 status: true,
 
                 basis: true,
 
                 amount: true,
+
+                cancellation: {
+                  select: {
+                    id: true,
+
+                    businessId: true,
+
+                    reservationId: true,
+                  },
+                },
+
+                reservationChange: {
+                  select: {
+                    id: true,
+
+                    businessId: true,
+
+                    reservationId: true,
+                  },
+                },
               },
             },
           },
@@ -228,30 +336,316 @@ export async function PATCH(
           throw new Error("RESERVATION_NOT_FOUND");
         }
 
+        /*
+         * Payment y Refund conservan businessId y
+         * reservationId para aislamiento y auditoría.
+         *
+         * No permitimos que datos inconsistentes
+         * participen en netPaid, balance, sobrepago
+         * ni en una nueva asignación de devolución.
+         */
+        const paymentIds = new Set<string>();
+
+        const nestedRefundIds = new Set<string>();
+
+        let financialScopeInvalid = false;
+
+        for (const payment of reservation.payments) {
+          if (
+            payment.businessId !== access.business.id ||
+            payment.reservationId !== reservation.id
+          ) {
+            financialScopeInvalid = true;
+          }
+
+          paymentIds.add(payment.id);
+
+          for (const refund of payment.refunds) {
+            if (
+              refund.businessId !== access.business.id ||
+              refund.reservationId !== reservation.id ||
+              refund.paymentId !== payment.id
+            ) {
+              financialScopeInvalid = true;
+            }
+
+            nestedRefundIds.add(refund.id);
+          }
+        }
+
+        const reservationRefundIds = new Set<string>();
+
+        for (const refund of reservation.refunds) {
+          reservationRefundIds.add(refund.id);
+
+          if (
+            refund.businessId !== access.business.id ||
+            refund.reservationId !== reservation.id ||
+            !paymentIds.has(refund.paymentId)
+          ) {
+            financialScopeInvalid = true;
+          }
+
+          /*
+           * Una devolución solamente puede tener
+           * una causa agrupable.
+           */
+          if (
+            refund.cancellationId !== null &&
+            refund.reservationChangeId !== null
+          ) {
+            financialScopeInvalid = true;
+          }
+
+          if (refund.cancellationId === null) {
+            if (refund.cancellation !== null) {
+              financialScopeInvalid = true;
+            }
+          } else if (
+            refund.cancellation === null ||
+            refund.cancellation.id !== refund.cancellationId ||
+            refund.cancellation.businessId !== access.business.id ||
+            refund.cancellation.reservationId !== reservation.id
+          ) {
+            financialScopeInvalid = true;
+          }
+
+          if (refund.reservationChangeId === null) {
+            if (refund.reservationChange !== null) {
+              financialScopeInvalid = true;
+            }
+          } else if (
+            refund.reservationChange === null ||
+            refund.reservationChange.id !== refund.reservationChangeId ||
+            refund.reservationChange.businessId !== access.business.id ||
+            refund.reservationChange.reservationId !== reservation.id
+          ) {
+            financialScopeInvalid = true;
+          }
+        }
+
+        if (
+          nestedRefundIds.size !== reservationRefundIds.size ||
+          [...nestedRefundIds].some(
+            (refundId) => !reservationRefundIds.has(refundId),
+          )
+        ) {
+          financialScopeInvalid = true;
+        }
+
+        if (financialScopeInvalid) {
+          throw new Error("RESCHEDULE_FINANCIAL_SCOPE_INVALID");
+        }
+
         // ───────────────────────────────────────
         // 4. ACTOR
         // ───────────────────────────────────────
 
-        const actor = await tx.user.findFirst({
+        /*
+         * La membresía se vuelve a comprobar
+         * dentro de la transacción.
+         */
+        const actorMembership = await tx.businessMembership.findFirst({
           where: {
-            id: changedById,
-
-            businessId: reservation.businessId,
-
+            businessId: access.business.id,
+            userId: access.user.id,
             isActive: true,
+            role: {
+              in: [...RESCHEDULE_UPDATE_ALLOWED_ROLES],
+            },
+            user: {
+              is: {
+                isActive: true,
+              },
+            },
+            business: {
+              is: {
+                isActive: true,
+              },
+            },
           },
-
           select: {
-            id: true,
-
-            name: true,
-
-            role: true,
+            user: {
+              select: {
+                id: true,
+              },
+            },
           },
         });
 
-        if (!actor) {
+        if (!actorMembership) {
           throw new Error("RESCHEDULE_ACTOR_NOT_VALID");
+        }
+
+        const actor = actorMembership.user;
+
+        /*
+         * Validamos que los snapshots operativos
+         * solamente apunten a configuraciones del
+         * negocio y de esta misma reserva.
+         */
+        const reservationServiceIds = new Set(
+          reservation.services.map((item) => item.id),
+        );
+
+        const serviceIdByReservationServiceId = new Map(
+          reservation.services.map(
+            (item) => [item.id, item.serviceId] as const,
+          ),
+        );
+
+        const serviceIds = [
+          ...new Set(reservation.services.map((item) => item.serviceId)),
+        ];
+
+        const scopedServices =
+          serviceIds.length === 0
+            ? []
+            : await tx.service.findMany({
+                where: {
+                  id: {
+                    in: serviceIds,
+                  },
+                  businessId: access.business.id,
+                },
+                select: {
+                  id: true,
+                },
+              });
+
+        const scopedServiceIds = new Set(
+          scopedServices.map((service) => service.id),
+        );
+
+        const serviceOptionIds = [
+          ...new Set(
+            reservation.options.flatMap((option) =>
+              option.serviceOptionId ? [option.serviceOptionId] : [],
+            ),
+          ),
+        ];
+
+        const scopedServiceOptions =
+          serviceOptionIds.length === 0
+            ? []
+            : await tx.serviceOption.findMany({
+                where: {
+                  id: {
+                    in: serviceOptionIds,
+                  },
+                  serviceId: {
+                    in: serviceIds,
+                  },
+                },
+                select: {
+                  id: true,
+                  serviceId: true,
+                  optionId: true,
+                },
+              });
+
+        const serviceOptionById = new Map(
+          scopedServiceOptions.map(
+            (serviceOption) => [serviceOption.id, serviceOption] as const,
+          ),
+        );
+
+        const businessOptionIds = [
+          ...new Set([
+            ...reservation.options.flatMap((option) =>
+              option.optionId ? [option.optionId] : [],
+            ),
+            ...scopedServiceOptions.map(
+              (serviceOption) => serviceOption.optionId,
+            ),
+          ]),
+        ];
+
+        const scopedBusinessOptions =
+          businessOptionIds.length === 0
+            ? []
+            : await tx.businessOption.findMany({
+                where: {
+                  id: {
+                    in: businessOptionIds,
+                  },
+                  businessId: access.business.id,
+                },
+                select: {
+                  id: true,
+                },
+              });
+
+        const scopedBusinessOptionIds = new Set(
+          scopedBusinessOptions.map((option) => option.id),
+        );
+
+        let operationalScopeInvalid =
+          scopedServiceIds.size !== serviceIds.length ||
+          scopedServiceOptions.length !== serviceOptionIds.length ||
+          scopedBusinessOptionIds.size !== businessOptionIds.length;
+
+        for (const item of reservation.services) {
+          if (
+            item.reservationId !== reservation.id ||
+            !scopedServiceIds.has(item.serviceId)
+          ) {
+            operationalScopeInvalid = true;
+          }
+        }
+
+        for (const option of reservation.options) {
+          if (option.reservationId !== reservation.id) {
+            operationalScopeInvalid = true;
+          }
+
+          if (
+            option.reservationServiceId !== null &&
+            !reservationServiceIds.has(option.reservationServiceId)
+          ) {
+            operationalScopeInvalid = true;
+          }
+
+          if (
+            option.optionId !== null &&
+            !scopedBusinessOptionIds.has(option.optionId)
+          ) {
+            operationalScopeInvalid = true;
+          }
+
+          if (option.serviceOptionId !== null) {
+            const serviceOption = serviceOptionById.get(
+              option.serviceOptionId,
+            );
+
+            if (!serviceOption) {
+              operationalScopeInvalid = true;
+              continue;
+            }
+
+            const expectedServiceId =
+              option.reservationServiceId !== null
+                ? serviceIdByReservationServiceId.get(
+                    option.reservationServiceId,
+                  )
+                : null;
+
+            if (
+              !scopedServiceIds.has(serviceOption.serviceId) ||
+              !scopedBusinessOptionIds.has(serviceOption.optionId) ||
+              (expectedServiceId !== null &&
+                expectedServiceId !== undefined &&
+                serviceOption.serviceId !== expectedServiceId) ||
+              (option.optionId !== null &&
+                serviceOption.optionId !== option.optionId)
+            ) {
+              operationalScopeInvalid = true;
+            }
+          }
+        }
+
+        if (operationalScopeInvalid) {
+          throw new Error("RESCHEDULE_OPERATIONAL_SCOPE_INVALID");
         }
 
         // ───────────────────────────────────────
@@ -448,6 +842,12 @@ export async function PATCH(
               id:
                 true,
 
+              reservationId:
+                true,
+
+              serviceOptionId:
+                true,
+
               includedQuantity:
                 true,
 
@@ -465,6 +865,9 @@ export async function PATCH(
 
               serviceOption: {
                 select: {
+                  id:
+                    true,
+
                   resourceTypes: {
                     select: {
                       resourceTypeId:
@@ -478,6 +881,201 @@ export async function PATCH(
               },
             },
           });
+
+        /*
+         * Antes de evaluar inventario validamos
+         * todas las relaciones físicas utilizadas
+         * por esta reprogramación.
+         *
+         * Las consultas permanecen secuenciales
+         * para la transacción interactiva.
+         */
+        const reservationOptionIds = new Set(
+          reservation.options.map((option) => option.id),
+        );
+
+        const reservationOptionById = new Map(
+          reservation.options.map(
+            (option) => [option.id, option] as const,
+          ),
+        );
+
+        const optionInventoryIds = new Set<string>();
+
+        let inventoryScopeInvalid = false;
+
+        for (const option of optionInventoryConfiguration) {
+          optionInventoryIds.add(option.id);
+
+          const snapshotOption = reservationOptionById.get(option.id);
+
+          if (
+            !snapshotOption ||
+            option.reservationId !== reservation.id ||
+            option.serviceOptionId !== snapshotOption.serviceOptionId
+          ) {
+            inventoryScopeInvalid = true;
+            continue;
+          }
+
+          if (snapshotOption.serviceOptionId === null) {
+            if (option.serviceOption !== null) {
+              inventoryScopeInvalid = true;
+            }
+          } else if (
+            option.serviceOption === null ||
+            option.serviceOption.id !== snapshotOption.serviceOptionId
+          ) {
+            inventoryScopeInvalid = true;
+          }
+        }
+
+        if (
+          optionInventoryIds.size !== reservationOptionIds.size ||
+          [...reservationOptionIds].some(
+            (optionId) => !optionInventoryIds.has(optionId),
+          )
+        ) {
+          inventoryScopeInvalid = true;
+        }
+
+        const reservationAssignments =
+          await tx.reservationResource.findMany({
+            where: {
+              reservationId: reservation.id,
+            },
+            select: {
+              id: true,
+              reservationId: true,
+              reservationServiceId: true,
+              reservationOptionId: true,
+              resourceId: true,
+            },
+            orderBy: {
+              id: "asc",
+            },
+          });
+
+        const assignmentResourceIds = [
+          ...new Set(
+            reservationAssignments.map(
+              (assignment) => assignment.resourceId,
+            ),
+          ),
+        ];
+
+        const scopedAssignmentResources =
+          assignmentResourceIds.length === 0
+            ? []
+            : await tx.resource.findMany({
+                where: {
+                  id: {
+                    in: assignmentResourceIds,
+                  },
+                  businessId: access.business.id,
+                },
+                select: {
+                  id: true,
+                  resourceTypeId: true,
+                },
+                orderBy: {
+                  id: "asc",
+                },
+              });
+
+        const assignmentResourceById = new Map(
+          scopedAssignmentResources.map(
+            (resource) => [resource.id, resource] as const,
+          ),
+        );
+
+        if (
+          scopedAssignmentResources.length !== assignmentResourceIds.length
+        ) {
+          inventoryScopeInvalid = true;
+        }
+
+        for (const assignment of reservationAssignments) {
+          if (
+            assignment.reservationId !== reservation.id ||
+            !assignmentResourceById.has(assignment.resourceId)
+          ) {
+            inventoryScopeInvalid = true;
+          }
+
+          if (
+            assignment.reservationServiceId !== null &&
+            !reservationServiceIds.has(assignment.reservationServiceId)
+          ) {
+            inventoryScopeInvalid = true;
+          }
+
+          if (
+            assignment.reservationOptionId !== null &&
+            !reservationOptionIds.has(assignment.reservationOptionId)
+          ) {
+            inventoryScopeInvalid = true;
+          }
+        }
+
+        const inventoryResourceTypeIds = new Set<string>();
+
+        for (
+          const requirement of
+          serviceInventoryConfiguration.resourceTypes
+        ) {
+          inventoryResourceTypeIds.add(requirement.resourceTypeId);
+        }
+
+        for (const option of optionInventoryConfiguration) {
+          for (
+            const requirement of
+            option.serviceOption?.resourceTypes ?? []
+          ) {
+            inventoryResourceTypeIds.add(requirement.resourceTypeId);
+          }
+        }
+
+        for (const resource of scopedAssignmentResources) {
+          if (resource.resourceTypeId !== null) {
+            inventoryResourceTypeIds.add(resource.resourceTypeId);
+          }
+        }
+
+        const scopedInventoryResourceTypes =
+          inventoryResourceTypeIds.size === 0
+            ? []
+            : await tx.resourceType.findMany({
+                where: {
+                  id: {
+                    in: [...inventoryResourceTypeIds],
+                  },
+                  businessId: access.business.id,
+                },
+                select: {
+                  id: true,
+                },
+                orderBy: {
+                  id: "asc",
+                },
+              });
+
+        const scopedInventoryResourceTypeIds = new Set(
+          scopedInventoryResourceTypes.map(
+            (resourceType) => resourceType.id,
+          ),
+        );
+
+        if (
+          scopedInventoryResourceTypeIds.size !==
+          inventoryResourceTypeIds.size
+        ) {
+          inventoryScopeInvalid = true;
+        }
+
+        if (inventoryScopeInvalid) {
+          throw new Error("RESCHEDULE_OPERATIONAL_SCOPE_INVALID");
+        }
 
         const prospectiveDemands:
           ProspectiveInventoryDemand[] =
@@ -938,6 +1536,8 @@ export async function PATCH(
         await tx.reservation.update({
           where: {
             id: reservation.id,
+
+            businessId: access.business.id,
           },
 
           data: {
@@ -965,6 +1565,8 @@ export async function PATCH(
         await tx.reservationService.update({
           where: {
             id: reservationService.id,
+
+            reservationId: reservation.id,
           },
 
           data: {
@@ -992,6 +1594,9 @@ export async function PATCH(
             where: {
               id:
                 optionItem.id,
+
+              reservationId:
+                reservation.id,
             },
 
             data: {
@@ -1082,9 +1687,11 @@ export async function PATCH(
         // 19. FINAL RESERVATION
         // ───────────────────────────────────────
 
-        const updatedReservation = await tx.reservation.findUniqueOrThrow({
+        const updatedReservation = await tx.reservation.findFirstOrThrow({
           where: {
             id: reservation.id,
+
+            businessId: access.business.id,
           },
 
           include: {
@@ -1196,7 +1803,7 @@ export async function PATCH(
     // 21. RESPONSE
     // ─────────────────────────────────────────────
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -1318,6 +1925,19 @@ export async function PATCH(
       })),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PATCH reservation reschedule error:", error);
 
     // ─────────────────────────────────────────────
@@ -1329,7 +1949,7 @@ export async function PATCH(
       error.message ===
         "PROSPECTIVE_INVENTORY_NOT_AVAILABLE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
 
@@ -1346,7 +1966,7 @@ export async function PATCH(
       );
     }
     if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Reserva no encontrada",
@@ -1365,7 +1985,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_ACTOR_NOT_VALID"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1385,7 +2005,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESERVATION_NOT_RESCHEDULABLE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva no puede reprogramarse desde su estado actual",
@@ -1400,7 +2020,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_AFTER_SERVICE_START"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1416,7 +2036,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_ACTIVE_REFUND"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1436,7 +2056,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "INVALID_RESCHEDULE_INTERVAL"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El nuevo intervalo de reserva no es válido",
@@ -1451,7 +2071,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_SAME_INTERVAL"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1471,7 +2091,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_VERTICAL_NOT_IMPLEMENTED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1487,7 +2107,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "HOTEL_RESCHEDULE_MULTI_SERVICE_NOT_IMPLEMENTED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1503,7 +2123,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "HOTEL_GUEST_BREAKDOWN_REQUIRED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1523,7 +2143,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESCHEDULE_NO_AVAILABILITY"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1536,7 +2156,7 @@ export async function PATCH(
     }
 
     if (error instanceof Error && error.message === "RATE_NOT_AVAILABLE") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1552,7 +2172,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "INVALID_NUMBER_OF_NIGHTS"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La cantidad de noches resultante no es válida",
@@ -1569,9 +2189,41 @@ export async function PATCH(
 
     if (
       error instanceof Error &&
+      error.message === "RESCHEDULE_OPERATIONAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "No fue posible validar la integridad operativa de la reserva.",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message === "RESCHEDULE_FINANCIAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "No fue posible validar la integridad financiera de la reserva.",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
       error.message === "INSUFFICIENT_REFUNDABLE_PAYMENT_PRINCIPAL"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1587,7 +2239,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "PAID_PAYMENT_WITHOUT_PAID_AT"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1611,7 +2263,7 @@ export async function PATCH(
       "code" in error &&
       error.code === "P2034"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1623,7 +2275,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "Error al reprogramar la reserva",
