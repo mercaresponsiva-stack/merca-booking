@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
 import { isReservationActive } from "@/lib/booking/reservation-state";
 
 import { checkResourceForInterval } from "@/lib/booking/resource-interval-check";
@@ -16,6 +22,28 @@ import {
   getReservationOptionResourceRequirementGroupKey,
 } from "@/lib/booking/reservation-option-operational-group";
 
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set("Cache-Control", "private, no-store, max-age=0, must-revalidate");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
+const RESOURCE_ASSIGNMENT_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -24,15 +52,49 @@ type RouteContext = {
 
 export async function GET(_request: Request, context: RouteContext) {
   try {
+    /*
+     * Autenticamos antes de consultar el alcance
+     * de cualquier reserva.
+     */
+    await requireAuthenticatedUser();
+
     const { id: reservationId } = await context.params;
 
     // ─────────────────────────────────────────────
     // RESERVATION + RESOURCE REQUIREMENTS
     // ─────────────────────────────────────────────
 
-    const reservation = await prisma.reservation.findUnique({
+    const reservationScope = await prisma.reservation.findUnique({
       where: {
         id: reservationId,
+      },
+
+      select: {
+        businessId: true,
+      },
+    });
+
+    if (!reservationScope) {
+      return privateJson(
+        {
+          success: false,
+          error: "Reserva no encontrada",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    const access = await requireBusinessAccess(
+      reservationScope.businessId,
+      RESOURCE_ASSIGNMENT_ALLOWED_ROLES,
+    );
+
+    const reservation = await prisma.reservation.findFirst({
+      where: {
+        id: reservationId,
+        businessId: access.business.id,
       },
 
       include: {
@@ -63,6 +125,7 @@ export async function GET(_request: Request, context: RouteContext) {
                 service: {
                   select: {
                     id: true,
+                    businessId: true,
                     name: true,
                     slug: true,
                   },
@@ -87,7 +150,7 @@ export async function GET(_request: Request, context: RouteContext) {
     });
 
     if (!reservation) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Reserva no encontrada",
@@ -98,8 +161,319 @@ export async function GET(_request: Request, context: RouteContext) {
       );
     }
 
+    /*
+     * Validamos el alcance de todo el grafo
+     * operativo antes de utilizarlo para
+     * disponibilidad o devolverlo al cliente.
+     */
+    const reservationServicesById =
+      new Map<
+        string,
+        (typeof reservation.services)[number]
+      >();
+
+    const operationalResourceTypeIds =
+      new Set<string>();
+
+    const operationalBusinessOptionIds =
+      new Set<string>();
+
+    let operationalScopeInvalid =
+      reservation.businessId !==
+      access.business.id;
+
+    for (
+      const reservationService of
+      reservation.services
+    ) {
+      reservationServicesById.set(
+        reservationService.id,
+        reservationService,
+      );
+
+      if (
+        reservationService.reservationId !==
+          reservation.id ||
+        reservationService.serviceId !==
+          reservationService.service.id ||
+        reservationService.service.businessId !==
+          access.business.id
+      ) {
+        operationalScopeInvalid =
+          true;
+      }
+
+      for (
+        const requirement of
+        reservationService.service.resourceTypes
+      ) {
+        operationalResourceTypeIds.add(
+          requirement.resourceTypeId,
+        );
+
+        if (
+          requirement.serviceId !==
+            reservationService.service.id ||
+          requirement.resourceTypeId !==
+            requirement.resourceType.id ||
+          requirement.resourceType.businessId !==
+            access.business.id
+        ) {
+          operationalScopeInvalid =
+            true;
+        }
+      }
+
+      for (
+        const assignment of
+        reservationService.resources
+      ) {
+        if (
+          assignment.reservationId !==
+            reservation.id ||
+          assignment.reservationServiceId !==
+            reservationService.id ||
+          assignment.resourceId !==
+            assignment.resource.id ||
+          assignment.resource.businessId !==
+            access.business.id ||
+          assignment.resource.resourceTypeId ===
+            null
+        ) {
+          operationalScopeInvalid =
+            true;
+        } else {
+          operationalResourceTypeIds.add(
+            assignment.resource.resourceTypeId,
+          );
+        }
+      }
+    }
+
+    for (
+      const reservationOption of
+      reservation.options
+    ) {
+      if (
+        reservationOption.reservationId !==
+        reservation.id
+      ) {
+        operationalScopeInvalid =
+          true;
+      }
+
+      const linkedReservationService =
+        reservationOption.reservationServiceId
+          ? reservationServicesById.get(
+              reservationOption.reservationServiceId,
+            ) ??
+            null
+          : null;
+
+      if (
+        reservationOption.reservationServiceId !==
+          null &&
+        !linkedReservationService
+      ) {
+        operationalScopeInvalid =
+          true;
+      }
+
+      if (
+        reservationOption.optionId !==
+        null
+      ) {
+        operationalBusinessOptionIds.add(
+          reservationOption.optionId,
+        );
+      }
+
+      const serviceOption =
+        reservationOption.serviceOption;
+
+      if (serviceOption) {
+        operationalBusinessOptionIds.add(
+          serviceOption.optionId,
+        );
+
+        if (
+          reservationOption.serviceOptionId !==
+            serviceOption.id ||
+          serviceOption.serviceId !==
+            serviceOption.service.id ||
+          serviceOption.service.businessId !==
+            access.business.id ||
+          (
+            linkedReservationService !==
+              null &&
+            linkedReservationService.serviceId !==
+              serviceOption.serviceId
+          ) ||
+          (
+            reservationOption.optionId !==
+              null &&
+            reservationOption.optionId !==
+              serviceOption.optionId
+          )
+        ) {
+          operationalScopeInvalid =
+            true;
+        }
+
+        for (
+          const requirement of
+          serviceOption.resourceTypes
+        ) {
+          operationalResourceTypeIds.add(
+            requirement.resourceTypeId,
+          );
+
+          if (
+            requirement.serviceOptionId !==
+              serviceOption.id ||
+            requirement.resourceTypeId !==
+              requirement.resourceType.id ||
+            requirement.resourceType.businessId !==
+              access.business.id
+          ) {
+            operationalScopeInvalid =
+              true;
+          }
+        }
+      } else if (
+        reservationOption.serviceOptionId !==
+        null
+      ) {
+        operationalScopeInvalid =
+          true;
+      }
+
+      for (
+        const assignment of
+        reservationOption.resources
+      ) {
+        if (
+          assignment.reservationId !==
+            reservation.id ||
+          assignment.reservationOptionId !==
+            reservationOption.id ||
+          assignment.resourceId !==
+            assignment.resource.id ||
+          assignment.resource.businessId !==
+            access.business.id ||
+          assignment.resource.resourceTypeId ===
+            null
+        ) {
+          operationalScopeInvalid =
+            true;
+        } else {
+          operationalResourceTypeIds.add(
+            assignment.resource.resourceTypeId,
+          );
+        }
+      }
+    }
+
+    const scopedResourceTypes =
+      operationalResourceTypeIds.size ===
+      0
+        ? []
+        : await prisma.resourceType.findMany({
+            where: {
+              id: {
+                in: [
+                  ...operationalResourceTypeIds,
+                ],
+              },
+
+              businessId:
+                access.business.id,
+            },
+
+            select: {
+              id:
+                true,
+            },
+          });
+
+    const scopedResourceTypeIds =
+      new Set(
+        scopedResourceTypes.map(
+          (resourceType) =>
+            resourceType.id,
+        ),
+      );
+
+    if (
+      scopedResourceTypeIds.size !==
+        operationalResourceTypeIds.size ||
+      [
+        ...operationalResourceTypeIds,
+      ].some(
+        (resourceTypeId) =>
+          !scopedResourceTypeIds.has(
+            resourceTypeId,
+          ),
+      )
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+
+    const scopedBusinessOptions =
+      operationalBusinessOptionIds.size ===
+      0
+        ? []
+        : await prisma.businessOption.findMany({
+            where: {
+              id: {
+                in: [
+                  ...operationalBusinessOptionIds,
+                ],
+              },
+
+              businessId:
+                access.business.id,
+            },
+
+            select: {
+              id:
+                true,
+            },
+          });
+
+    const scopedBusinessOptionIds =
+      new Set(
+        scopedBusinessOptions.map(
+          (businessOption) =>
+            businessOption.id,
+        ),
+      );
+
+    if (
+      scopedBusinessOptionIds.size !==
+        operationalBusinessOptionIds.size ||
+      [
+        ...operationalBusinessOptionIds,
+      ].some(
+        (businessOptionId) =>
+          !scopedBusinessOptionIds.has(
+            businessOptionId,
+          ),
+      )
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+
+    if (operationalScopeInvalid) {
+      throw new Error(
+        "RESERVATION_RESOURCE_OPERATIONAL_SCOPE_INVALID",
+      );
+    }
+
     if (!isReservationActive(reservation.status)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya no permite asignar recursos",
@@ -697,7 +1071,7 @@ export async function GET(_request: Request, context: RouteContext) {
       }
     }
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -717,9 +1091,39 @@ export async function GET(_request: Request, context: RouteContext) {
       optionRequirements,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET reservation resources error:", error);
 
-    return NextResponse.json(
+    if (
+      error instanceof Error &&
+      error.message ===
+        "RESERVATION_RESOURCE_OPERATIONAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "No fue posible validar la integridad operativa de los recursos de la reserva.",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
+    return privateJson(
       {
         success: false,
         error: "No fue posible consultar los recursos disponibles",
@@ -736,6 +1140,12 @@ export async function PATCH(
   context: RouteContext,
 ) {
   try {
+    /*
+     * Autenticamos antes de consultar el alcance
+     * de cualquier reserva o procesar la mutación.
+     */
+    await requireAuthenticatedUser();
+
     const { id: reservationId } =
       await context.params;
 
@@ -745,7 +1155,7 @@ export async function PATCH(
       rawBody =
         await request.json();
     } catch {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -766,7 +1176,7 @@ export async function PATCH(
         rawBody,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -797,7 +1207,7 @@ export async function PATCH(
         : "";
 
     if (!resourceId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -810,7 +1220,7 @@ export async function PATCH(
     }
 
     if (!reservationOptionId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -822,17 +1232,58 @@ export async function PATCH(
       );
     }
 
+    const reservationScope =
+      await prisma.reservation.findUnique({
+        where: {
+          id:
+            reservationId,
+        },
+
+        select: {
+          businessId:
+            true,
+        },
+      });
+
+    if (!reservationScope) {
+      throw new Error(
+        "RESERVATION_NOT_FOUND",
+      );
+    }
+
+    const access =
+      await requireBusinessAccess(
+        reservationScope.businessId,
+        RESOURCE_ASSIGNMENT_ALLOWED_ROLES,
+      );
+
     const result =
       await prisma.$transaction(
         async (tx) => {
           const reservation =
-            await tx.reservation.findUnique({
+            await tx.reservation.findFirst({
               where: {
                 id:
                   reservationId,
+
+                businessId:
+                  access.business.id,
               },
 
               include: {
+                services: {
+                  select: {
+                    id:
+                      true,
+
+                    reservationId:
+                      true,
+
+                    serviceId:
+                      true,
+                  },
+                },
+
                 options: {
                   include: {
                     serviceOption: {
@@ -849,6 +1300,9 @@ export async function PATCH(
                             id:
                               true,
 
+                            businessId:
+                              true,
+
                             resourceTypeId:
                               true,
                           },
@@ -863,6 +1317,374 @@ export async function PATCH(
           if (!reservation) {
             throw new Error(
               "RESERVATION_NOT_FOUND",
+            );
+          }
+
+          /*
+           * La membresía se comprueba nuevamente
+           * dentro de la transacción Serializable.
+           */
+          const actorMembership =
+            await tx.businessMembership.findFirst({
+              where: {
+                businessId:
+                  access.business.id,
+
+                userId:
+                  access.user.id,
+
+                isActive:
+                  true,
+
+                role: {
+                  in: [
+                    ...RESOURCE_ASSIGNMENT_ALLOWED_ROLES,
+                  ],
+                },
+
+                user: {
+                  is: {
+                    isActive:
+                      true,
+                  },
+                },
+
+                business: {
+                  is: {
+                    isActive:
+                      true,
+                  },
+                },
+              },
+
+              select: {
+                user: {
+                  select: {
+                    id:
+                      true,
+                  },
+                },
+              },
+            });
+
+          if (!actorMembership) {
+            throw new Error(
+              "RESOURCE_ASSIGNMENT_ACTOR_NOT_VALID",
+            );
+          }
+
+          /*
+           * Validamos el grafo utilizado por la mutación
+           * antes de comprobar disponibilidad o escribir.
+           */
+          const reservationServicesById =
+            new Map<
+              string,
+              (typeof reservation.services)[number]
+            >();
+
+          const operationalServiceIds =
+            new Set<string>();
+
+          const operationalResourceTypeIds =
+            new Set<string>();
+
+          const operationalBusinessOptionIds =
+            new Set<string>();
+
+          let operationalScopeInvalid =
+            reservation.businessId !==
+            access.business.id;
+
+          for (
+            const reservationService of
+            reservation.services
+          ) {
+            reservationServicesById.set(
+              reservationService.id,
+              reservationService,
+            );
+
+            operationalServiceIds.add(
+              reservationService.serviceId,
+            );
+
+            if (
+              reservationService.reservationId !==
+              reservation.id
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+          }
+
+          for (
+            const reservationOption of
+            reservation.options
+          ) {
+            if (
+              reservationOption.reservationId !==
+              reservation.id
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+
+            const linkedReservationService =
+              reservationOption.reservationServiceId
+                ? reservationServicesById.get(
+                    reservationOption.reservationServiceId,
+                  ) ??
+                  null
+                : null;
+
+            if (
+              reservationOption.reservationServiceId !==
+                null &&
+              !linkedReservationService
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+
+            if (
+              reservationOption.optionId !==
+              null
+            ) {
+              operationalBusinessOptionIds.add(
+                reservationOption.optionId,
+              );
+            }
+
+            const serviceOption =
+              reservationOption.serviceOption;
+
+            if (serviceOption) {
+              operationalServiceIds.add(
+                serviceOption.serviceId,
+              );
+
+              operationalBusinessOptionIds.add(
+                serviceOption.optionId,
+              );
+
+              if (
+                reservationOption.serviceOptionId !==
+                  serviceOption.id ||
+                (
+                  linkedReservationService !==
+                    null &&
+                  linkedReservationService.serviceId !==
+                    serviceOption.serviceId
+                ) ||
+                (
+                  reservationOption.optionId !==
+                    null &&
+                  reservationOption.optionId !==
+                    serviceOption.optionId
+                )
+              ) {
+                operationalScopeInvalid =
+                  true;
+              }
+
+              for (
+                const requirement of
+                serviceOption.resourceTypes
+              ) {
+                operationalResourceTypeIds.add(
+                  requirement.resourceTypeId,
+                );
+
+                if (
+                  requirement.serviceOptionId !==
+                  serviceOption.id
+                ) {
+                  operationalScopeInvalid =
+                    true;
+                }
+              }
+            } else if (
+              reservationOption.serviceOptionId !==
+              null
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+
+            for (
+              const assignment of
+              reservationOption.resources
+            ) {
+              if (
+                assignment.reservationId !==
+                  reservation.id ||
+                assignment.reservationOptionId !==
+                  reservationOption.id ||
+                assignment.resourceId !==
+                  assignment.resource.id ||
+                assignment.resource.businessId !==
+                  access.business.id ||
+                assignment.resource.resourceTypeId ===
+                  null ||
+                (
+                  assignment.reservationServiceId !==
+                    null &&
+                  assignment.reservationServiceId !==
+                    reservationOption.reservationServiceId
+                )
+              ) {
+                operationalScopeInvalid =
+                  true;
+              } else {
+                operationalResourceTypeIds.add(
+                  assignment.resource.resourceTypeId,
+                );
+              }
+            }
+          }
+
+          const scopedServices =
+            operationalServiceIds.size ===
+            0
+              ? []
+              : await tx.service.findMany({
+                  where: {
+                    id: {
+                      in: [
+                        ...operationalServiceIds,
+                      ],
+                    },
+
+                    businessId:
+                      access.business.id,
+                  },
+
+                  select: {
+                    id:
+                      true,
+                  },
+                });
+
+          const scopedServiceIds =
+            new Set(
+              scopedServices.map(
+                (service) =>
+                  service.id,
+              ),
+            );
+
+          if (
+            scopedServiceIds.size !==
+              operationalServiceIds.size ||
+            [
+              ...operationalServiceIds,
+            ].some(
+              (serviceId) =>
+                !scopedServiceIds.has(
+                  serviceId,
+                ),
+            )
+          ) {
+            operationalScopeInvalid =
+              true;
+          }
+
+          const scopedResourceTypes =
+            operationalResourceTypeIds.size ===
+            0
+              ? []
+              : await tx.resourceType.findMany({
+                  where: {
+                    id: {
+                      in: [
+                        ...operationalResourceTypeIds,
+                      ],
+                    },
+
+                    businessId:
+                      access.business.id,
+                  },
+
+                  select: {
+                    id:
+                      true,
+                  },
+                });
+
+          const scopedResourceTypeIds =
+            new Set(
+              scopedResourceTypes.map(
+                (resourceType) =>
+                  resourceType.id,
+              ),
+            );
+
+          if (
+            scopedResourceTypeIds.size !==
+              operationalResourceTypeIds.size ||
+            [
+              ...operationalResourceTypeIds,
+            ].some(
+              (resourceTypeId) =>
+                !scopedResourceTypeIds.has(
+                  resourceTypeId,
+                ),
+            )
+          ) {
+            operationalScopeInvalid =
+              true;
+          }
+
+          const scopedBusinessOptions =
+            operationalBusinessOptionIds.size ===
+            0
+              ? []
+              : await tx.businessOption.findMany({
+                  where: {
+                    id: {
+                      in: [
+                        ...operationalBusinessOptionIds,
+                      ],
+                    },
+
+                    businessId:
+                      access.business.id,
+                  },
+
+                  select: {
+                    id:
+                      true,
+                  },
+                });
+
+          const scopedBusinessOptionIds =
+            new Set(
+              scopedBusinessOptions.map(
+                (businessOption) =>
+                  businessOption.id,
+              ),
+            );
+
+          if (
+            scopedBusinessOptionIds.size !==
+              operationalBusinessOptionIds.size ||
+            [
+              ...operationalBusinessOptionIds,
+            ].some(
+              (businessOptionId) =>
+                !scopedBusinessOptionIds.has(
+                  businessOptionId,
+                ),
+            )
+          ) {
+            operationalScopeInvalid =
+              true;
+          }
+
+          if (operationalScopeInvalid) {
+            throw new Error(
+              "RESERVATION_RESOURCE_OPERATIONAL_SCOPE_INVALID",
             );
           }
 
@@ -907,6 +1729,17 @@ export async function PATCH(
           ) {
             throw new Error(
               "RESOURCE_TYPE_NOT_CONFIGURED",
+            );
+          }
+
+          if (
+            resource.resourceType.id !==
+              resource.resourceTypeId ||
+            resource.resourceType.businessId !==
+              access.business.id
+          ) {
+            throw new Error(
+              "RESERVATION_RESOURCE_OPERATIONAL_SCOPE_INVALID",
             );
           }
 
@@ -1071,7 +1904,7 @@ export async function PATCH(
         },
       );
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -1161,6 +1994,19 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error(
       "PATCH reservation option resource assignment error:",
       error,
@@ -1173,9 +2019,41 @@ export async function PATCH(
 
     if (
       errorCode ===
+      "RESOURCE_ASSIGNMENT_ACTOR_NOT_VALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "El usuario ya no tiene autorización para asignar recursos en este negocio",
+        },
+        {
+          status: 403,
+        },
+      );
+    }
+
+    if (
+      errorCode ===
+      "RESERVATION_RESOURCE_OPERATIONAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "No fue posible validar la integridad operativa de los recursos de la reserva.",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
+    if (
+      errorCode ===
       "RESERVATION_NOT_FOUND"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1191,7 +2069,7 @@ export async function PATCH(
       errorCode ===
       "RESERVATION_NOT_ASSIGNABLE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1209,7 +2087,7 @@ export async function PATCH(
       errorCode ===
         "RESERVATION_OPTION_NOT_VALID"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1225,7 +2103,7 @@ export async function PATCH(
       errorCode ===
       "RESERVATION_OPTION_NOT_ACTIVE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1241,7 +2119,7 @@ export async function PATCH(
       errorCode ===
       "RESERVATION_OPTION_CONFIGURATION_REQUIRED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1257,7 +2135,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_NOT_ALLOWED_FOR_OPTION"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1273,7 +2151,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_NOT_FOUND"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1289,7 +2167,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_ALREADY_ASSIGNED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1305,7 +2183,7 @@ export async function PATCH(
       errorCode ===
       "OPTION_RESOURCE_REQUIREMENT_ALREADY_SATISFIED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1321,7 +2199,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_ALREADY_OCCUPIED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1337,7 +2215,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_BLOCKED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1353,7 +2231,7 @@ export async function PATCH(
       errorCode ===
       "RESOURCE_TYPE_NOT_CONFIGURED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1373,7 +2251,7 @@ export async function PATCH(
       errorCode ===
         "INVALID_RESERVATION_OPTION_INTERVAL"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1399,7 +2277,7 @@ export async function PATCH(
           "P2034"
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -1411,7 +2289,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error:
