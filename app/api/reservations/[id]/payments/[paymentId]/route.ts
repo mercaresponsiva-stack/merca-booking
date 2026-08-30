@@ -1,3 +1,4 @@
+import { toCents } from "@/lib/booking/money";
 import { isReservationPayable } from "@/lib/booking/reservation-state";
 import {
   isPaymentTargetStatus,
@@ -302,15 +303,23 @@ export async function PATCH(
             where: {
               reservationId: reservation.id,
             },
+
             select: {
               id: true,
               businessId: true,
               reservationId: true,
+
+              amount: true,
+              status: true,
+
               refunds: {
                 select: {
                   businessId: true,
                   reservationId: true,
                   paymentId: true,
+
+                  amount: true,
+                  status: true,
                 },
               },
             },
@@ -326,32 +335,27 @@ export async function PATCH(
             throw new Error("PAYMENT_FINANCIAL_SCOPE_INVALID");
           }
 
-          const paidAggregate = await tx.payment.aggregate({
-            where: {
-              reservationId: reservation.id,
-              businessId: access.business.id,
-
-              status: "PAID",
-
-              id: {
-                not: payment.id,
-              },
-            },
-
-            _sum: {
-              amount: true,
-            },
+          /*
+           * El Payment que se está confirmando todavía
+           * permanece PENDING y no forma parte de netPaid.
+           *
+           * Las devoluciones COMPLETED sí reducen netPaid
+           * y vuelven a generar saldo contractual.
+           *
+           * Las devoluciones PENDING o PROCESSING todavía
+           * no liberan saldo porque el dinero no ha salido.
+           */
+          const currentPaymentSummary = calculatePaymentSummary({
+            total: Number(reservation.total),
+            paymentOption: reservation.paymentOption,
+            payments: financialRecords,
           });
 
-          const total = Number(reservation.total);
+          const remainingBalanceCents = toCents(currentPaymentSummary.balance);
 
-          const alreadyPaid = Number(paidAggregate._sum.amount ?? 0);
+          const paymentAmountCents = toCents(Number(payment.amount));
 
-          const remainingBalance = Math.max(total - alreadyPaid, 0);
-
-          const paymentAmount = Number(payment.amount);
-
-          if (paymentAmount > remainingBalance) {
+          if (paymentAmountCents > remainingBalanceCents) {
             throw new Error("PAYMENT_EXCEEDS_CURRENT_BALANCE");
           }
         }
