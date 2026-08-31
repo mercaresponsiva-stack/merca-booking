@@ -13,6 +13,58 @@ import {
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(
+  body:
+    unknown,
+
+  init:
+    ResponseInit = {},
+) {
+  const headers =
+    new Headers(
+      init.headers,
+    );
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+const STAY_EXTENSION_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
 const STAY_EXTENSION_CONFIGURATION_ERRORS:
   ReadonlySet<string> =
   new Set([
@@ -60,7 +112,7 @@ function errorResponse(
   status:
     number,
 ) {
-  return NextResponse.json(
+  return privateJson(
     {
       success:
         false,
@@ -88,18 +140,24 @@ export async function PATCH(
   },
 ) {
   try {
+    /*
+     * Autenticamos antes de consultar el alcance
+     * de cualquier reserva o procesar el cuerpo.
+     */
+    await requireAuthenticatedUser();
+
     const {
-      id,
+      id:
+        reservationId,
     } =
       await context.params;
 
-    let body:
-      Record<string, unknown>;
+    let rawBody:
+      unknown;
 
     try {
-      body =
-        await request.json() as
-          Record<string, unknown>;
+      rawBody =
+        await request.json();
     } catch {
       return errorResponse(
         "INVALID_JSON",
@@ -108,17 +166,37 @@ export async function PATCH(
       );
     }
 
+    if (
+      typeof rawBody !==
+        "object" ||
+      rawBody ===
+        null ||
+      Array.isArray(
+        rawBody,
+      )
+    ) {
+      return errorResponse(
+        "INVALID_JSON",
+        "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        400,
+      );
+    }
+
+    const body =
+      rawBody as
+        Record<string, unknown>;
+
     const checkOut =
       typeof body.checkOut ===
       "string"
         ? body.checkOut.trim()
         : "";
 
-    const changedById =
-      typeof body.changedById ===
-      "string"
-        ? body.changedById.trim()
-        : "";
+    /*
+     * changedById puede seguir llegando por
+     * compatibilidad, pero nunca se utiliza.
+     * La auditoría toma el actor de la sesión.
+     */
 
     const reason =
       typeof body.reason ===
@@ -147,13 +225,33 @@ export async function PATCH(
       );
     }
 
-    if (!changedById) {
+
+    const reservationScope =
+      await prisma.reservation.findUnique({
+        where: {
+          id:
+            reservationId,
+        },
+
+        select: {
+          businessId:
+            true,
+        },
+      });
+
+    if (!reservationScope) {
       return errorResponse(
-        "STAY_EXTENSION_CHANGED_BY_REQUIRED",
-        "changedById es requerido.",
-        400,
+        "RESERVATION_NOT_FOUND",
+        "Reserva no encontrada.",
+        404,
       );
     }
+
+    const access =
+      await requireBusinessAccess(
+        reservationScope.businessId,
+        STAY_EXTENSION_ALLOWED_ROLES,
+      );
 
     /*
      * Un solo instante coherente para
@@ -168,13 +266,16 @@ export async function PATCH(
           tx,
         ) =>
           extendCheckedInHotelStay({
-            reservationId:
-              id,
+            reservationId,
+
+            businessId:
+              access.business.id,
 
             newCheckOut:
               checkOut,
 
-            changedById,
+            changedById:
+              access.user.id,
 
             reason,
 
@@ -190,7 +291,7 @@ export async function PATCH(
         },
       );
 
-    return NextResponse.json({
+    return privateJson({
       success:
         true,
 
@@ -286,6 +387,17 @@ export async function PATCH(
   } catch (
     error
   ) {
+    if (
+      error instanceof
+      AuthorizationError
+    ) {
+      return errorResponse(
+        error.code,
+        error.message,
+        error.status,
+      );
+    }
+
     const errorCode =
       error instanceof
       Error
@@ -333,6 +445,28 @@ export async function PATCH(
         errorCode,
         "Solo puede extenderse una reserva que tenga el check-in realizado.",
         409,
+      );
+    }
+
+    if (
+      errorCode ===
+      "STAY_EXTENSION_FINANCIAL_SCOPE_INVALID"
+    ) {
+      return errorResponse(
+        "STAY_EXTENSION_FAILED",
+        "No fue posible validar la integridad financiera de la reserva.",
+        500,
+      );
+    }
+
+    if (
+      errorCode ===
+      "STAY_EXTENSION_OPERATIONAL_SCOPE_INVALID"
+    ) {
+      return errorResponse(
+        "STAY_EXTENSION_FAILED",
+        "No fue posible validar la integridad operativa de los recursos de la reserva.",
+        500,
       );
     }
 
@@ -511,8 +645,14 @@ export async function PATCH(
         null &&
       "code" in
         error &&
-      error.code ===
-        "P2034"
+      (
+        error.code ===
+          "P2002" ||
+        error.code ===
+          "P2025" ||
+        error.code ===
+          "P2034"
+      )
     ) {
       return errorResponse(
         "STAY_EXTENSION_CONCURRENT_MODIFICATION",

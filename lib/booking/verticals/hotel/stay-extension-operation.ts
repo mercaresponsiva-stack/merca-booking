@@ -50,19 +50,31 @@ export type HotelStayExtensionDb =
     | "reservationOption"
     | "payment"
     | "refund"
-    | "user"
+    | "businessMembership"
     | "service"
     | "serviceRate"
     | "serviceResourceType"
     | "serviceOptionResourceType"
+    | "serviceOption"
+    | "businessOption"
     | "reservationResource"
     | "resource"
+    | "resourceType"
     | "reservationChange"
     | "block"
   >;
 
+const STAY_EXTENSION_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
 type ExtendCheckedInHotelStayInput = {
   reservationId:
+    string;
+
+  businessId:
     string;
 
   newCheckOut:
@@ -233,6 +245,8 @@ function resolveAverageNightlyPrice(
 export async function extendCheckedInHotelStay({
   reservationId,
 
+  businessId,
+
   newCheckOut,
 
   changedById,
@@ -251,10 +265,12 @@ export async function extendCheckedInHotelStay({
    * dentro de la misma transacción.
    */
   const reservation =
-    await db.reservation.findUnique({
+    await db.reservation.findFirst({
       where: {
         id:
           reservationId,
+
+        businessId,
       },
 
       select: {
@@ -294,10 +310,13 @@ export async function extendCheckedInHotelStay({
   }
 
   const business =
-    await db.business.findUnique({
+    await db.business.findFirst({
       where: {
         id:
-          reservation.businessId,
+          businessId,
+
+        isActive:
+          true,
       },
 
       select: {
@@ -322,10 +341,13 @@ export async function extendCheckedInHotelStay({
   }
 
   const businessType =
-    await db.businessType.findUnique({
+    await db.businessType.findFirst({
       where: {
         id:
           business.businessTypeId,
+
+        isActive:
+          true,
       },
 
       select: {
@@ -353,6 +375,9 @@ export async function extendCheckedInHotelStay({
 
       select: {
         id:
+          true,
+
+        reservationId:
           true,
 
         serviceId:
@@ -410,36 +435,59 @@ export async function extendCheckedInHotelStay({
     );
   }
 
-  const actor =
-    await db.user.findFirst({
+  const actorMembership =
+    await db.businessMembership.findFirst({
       where: {
-        id:
-          changedById,
+        businessId,
 
-        businessId:
-          reservation.businessId,
+        userId:
+          changedById,
 
         isActive:
           true,
+
+        role: {
+          in: [
+            ...STAY_EXTENSION_ALLOWED_ROLES,
+          ],
+        },
+
+        user: {
+          is: {
+            isActive:
+              true,
+          },
+        },
+
+        business: {
+          is: {
+            isActive:
+              true,
+          },
+        },
       },
 
       select: {
-        id:
-          true,
+        user: {
+          select: {
+            id:
+              true,
 
-        name:
-          true,
-
-        role:
-          true,
+            name:
+              true,
+          },
+        },
       },
     });
 
-  if (!actor) {
+  if (!actorMembership) {
     throw new Error(
       "STAY_EXTENSION_ACTOR_NOT_VALID",
     );
   }
+
+  const actor =
+    actorMembership.user;
 
   const options =
     await db.reservationOption.findMany({
@@ -450,6 +498,15 @@ export async function extendCheckedInHotelStay({
 
       select: {
         id:
+          true,
+
+        reservationId:
+          true,
+
+        reservationServiceId:
+          true,
+
+        optionId:
           true,
 
         serviceOptionId:
@@ -503,6 +560,12 @@ export async function extendCheckedInHotelStay({
         id:
           true,
 
+        businessId:
+          true,
+
+        reservationId:
+          true,
+
         amount:
           true,
 
@@ -524,6 +587,12 @@ export async function extendCheckedInHotelStay({
       },
 
       select: {
+        businessId:
+          true,
+
+        reservationId:
+          true,
+
         paymentId:
           true,
 
@@ -534,6 +603,46 @@ export async function extendCheckedInHotelStay({
           true,
       },
     });
+
+  const paymentIds =
+    new Set(
+      payments.map(
+        (
+          payment,
+        ) =>
+          payment.id,
+      ),
+    );
+
+  const financialScopeInvalid =
+    payments.some(
+      (
+        payment,
+      ) =>
+        payment.businessId !==
+          businessId ||
+        payment.reservationId !==
+          reservation.id,
+    ) ||
+    refunds.some(
+      (
+        refund,
+      ) =>
+        refund.businessId !==
+          businessId ||
+        refund.reservationId !==
+          reservation.id ||
+        !refund.paymentId ||
+        !paymentIds.has(
+          refund.paymentId,
+        ),
+    );
+
+  if (financialScopeInvalid) {
+    throw new Error(
+      "STAY_EXTENSION_FINANCIAL_SCOPE_INVALID",
+    );
+  }
 
   const hasActiveRefund =
     refunds.some(
@@ -676,6 +785,9 @@ export async function extendCheckedInHotelStay({
       },
 
       select: {
+        serviceId:
+          true,
+
         resourceTypeId:
           true,
 
@@ -731,6 +843,9 @@ export async function extendCheckedInHotelStay({
         id:
           true,
 
+        reservationId:
+          true,
+
         resourceId:
           true,
 
@@ -754,10 +869,15 @@ export async function extendCheckedInHotelStay({
                 assignment.resourceId,
             ),
         },
+
+        businessId,
       },
 
       select: {
         id:
+          true,
+
+        businessId:
           true,
 
         resourceTypeId:
@@ -776,6 +896,352 @@ export async function extendCheckedInHotelStay({
         ],
       ),
     );
+
+  const authorizedServiceOptions =
+    serviceOptionIds.length ===
+      0
+      ? []
+      : await db.serviceOption.findMany({
+          where: {
+            id: {
+              in:
+                serviceOptionIds,
+            },
+
+            serviceId:
+              reservationService.serviceId,
+          },
+
+          select: {
+            id:
+              true,
+
+            serviceId:
+              true,
+
+            optionId:
+              true,
+          },
+        });
+
+  const authorizedServiceOptionById =
+    new Map(
+      authorizedServiceOptions.map(
+        (
+          serviceOption,
+        ) => [
+          serviceOption.id,
+          serviceOption,
+        ],
+      ),
+    );
+
+  const operationalBusinessOptionIds =
+    new Set<string>(
+      options.flatMap(
+        (
+          option,
+        ) =>
+          option.optionId
+            ? [
+                option.optionId,
+              ]
+            : [],
+      ),
+    );
+
+  for (
+    const serviceOption of
+    authorizedServiceOptions
+  ) {
+    operationalBusinessOptionIds.add(
+      serviceOption.optionId,
+    );
+  }
+
+  const authorizedBusinessOptions =
+    operationalBusinessOptionIds.size ===
+      0
+      ? []
+      : await db.businessOption.findMany({
+          where: {
+            id: {
+              in: [
+                ...operationalBusinessOptionIds,
+              ],
+            },
+
+            businessId,
+          },
+
+          select: {
+            id:
+              true,
+          },
+        });
+
+  const authorizedBusinessOptionIds =
+    new Set(
+      authorizedBusinessOptions.map(
+        (
+          businessOption,
+        ) =>
+          businessOption.id,
+      ),
+    );
+
+  const operationalResourceTypeIds =
+    new Set<string>();
+
+  for (
+    const requirement of
+    serviceRequirements
+  ) {
+    operationalResourceTypeIds.add(
+      requirement.resourceTypeId,
+    );
+  }
+
+  for (
+    const requirement of
+    optionRequirements
+  ) {
+    operationalResourceTypeIds.add(
+      requirement.resourceTypeId,
+    );
+  }
+
+  for (
+    const resource of
+    assignedResources
+  ) {
+    if (resource.resourceTypeId) {
+      operationalResourceTypeIds.add(
+        resource.resourceTypeId,
+      );
+    }
+  }
+
+  const authorizedResourceTypes =
+    operationalResourceTypeIds.size ===
+      0
+      ? []
+      : await db.resourceType.findMany({
+          where: {
+            id: {
+              in: [
+                ...operationalResourceTypeIds,
+              ],
+            },
+
+            businessId,
+          },
+
+          select: {
+            id:
+              true,
+          },
+        });
+
+  const optionById =
+    new Map(
+      options.map(
+        (
+          option,
+        ) => [
+          option.id,
+          option,
+        ],
+      ),
+    );
+
+  const serviceResourceTypeIds =
+    new Set(
+      serviceRequirements.map(
+        (
+          requirement,
+        ) =>
+          requirement.resourceTypeId,
+      ),
+    );
+
+  let operationalScopeInvalid =
+    reservationService.reservationId !==
+      reservation.id ||
+    authorizedServiceOptions.length !==
+      serviceOptionIds.length ||
+    authorizedBusinessOptions.length !==
+      operationalBusinessOptionIds.size ||
+    authorizedResourceTypes.length !==
+      operationalResourceTypeIds.size ||
+    assignedResources.length !==
+      new Set(
+        assignments.map(
+          (
+            assignment,
+          ) =>
+            assignment.resourceId,
+        ),
+      ).size;
+
+  for (
+    const requirement of
+    serviceRequirements
+  ) {
+    if (
+      requirement.serviceId !==
+        reservationService.serviceId ||
+      !Number.isInteger(
+        requirement.requiredQuantity,
+      ) ||
+      requirement.requiredQuantity <
+        1 ||
+      !Number.isSafeInteger(
+        requirement.requiredQuantity *
+          reservationService.quantity,
+      )
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+  }
+
+  for (
+    const requirement of
+    optionRequirements
+  ) {
+    if (
+      !authorizedServiceOptionById.has(
+        requirement.serviceOptionId,
+      ) ||
+      !Number.isInteger(
+        requirement.requiredQuantity,
+      ) ||
+      requirement.requiredQuantity <
+        1
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+  }
+
+  for (
+    const option of
+    options
+  ) {
+    const serviceOption =
+      option.serviceOptionId
+        ? authorizedServiceOptionById.get(
+            option.serviceOptionId,
+          )
+        : null;
+
+    if (
+      option.reservationId !==
+        reservation.id ||
+      (
+        option.reservationServiceId !==
+          null &&
+        option.reservationServiceId !==
+          reservationService.id
+      ) ||
+      (
+        option.optionId !==
+          null &&
+        !authorizedBusinessOptionIds.has(
+          option.optionId,
+        )
+      ) ||
+      (
+        option.serviceOptionId !==
+          null &&
+        !serviceOption
+      ) ||
+      (
+        serviceOption &&
+        option.optionId !==
+          null &&
+        serviceOption.optionId !==
+          option.optionId
+      )
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+  }
+
+  for (
+    const assignment of
+    assignments
+  ) {
+    const resourceTypeId =
+      resourceTypeByResourceId.get(
+        assignment.resourceId,
+      );
+
+    const hasService =
+      assignment.reservationServiceId !==
+      null;
+
+    const hasOption =
+      assignment.reservationOptionId !==
+      null;
+
+    const reservationOption =
+      assignment.reservationOptionId
+        ? optionById.get(
+            assignment.reservationOptionId,
+          )
+        : null;
+
+    const optionAllowsResourceType =
+      reservationOption?.serviceOptionId &&
+      resourceTypeId
+        ? optionRequirements.some(
+            (
+              requirement,
+            ) =>
+              requirement.serviceOptionId ===
+                reservationOption.serviceOptionId &&
+              requirement.resourceTypeId ===
+                resourceTypeId,
+          )
+        : false;
+
+    if (
+      assignment.reservationId !==
+        reservation.id ||
+      !resourceTypeId ||
+      hasService ===
+        hasOption ||
+      (
+        hasService &&
+        (
+          assignment.reservationServiceId !==
+            reservationService.id ||
+          !serviceResourceTypeIds.has(
+            resourceTypeId,
+          )
+        )
+      ) ||
+      (
+        hasOption &&
+        (
+          !reservationOption ||
+          !optionAllowsResourceType
+        )
+      )
+    ) {
+      operationalScopeInvalid =
+        true;
+    }
+  }
+
+  if (operationalScopeInvalid) {
+    throw new Error(
+      "STAY_EXTENSION_OPERATIONAL_SCOPE_INVALID",
+    );
+  }
 
   /*
    * Una estancia ya iniciada debe conservar
@@ -916,10 +1382,17 @@ export async function extendCheckedInHotelStay({
     ) {
       const requiredResources =
         activeQuantity.activeQuantity *
-        Math.max(
-          requirement.requiredQuantity,
-          1,
+        requirement.requiredQuantity;
+
+      if (
+        !Number.isSafeInteger(
+          requiredResources,
+        )
+      ) {
+        throw new Error(
+          "STAY_EXTENSION_OPERATIONAL_SCOPE_INVALID",
         );
+      }
 
       const assignedCount =
         assignments.filter(
@@ -1157,6 +1630,43 @@ export async function extendCheckedInHotelStay({
       optionExtension.newNights,
     );
 
+  const reservationOptionIds =
+    new Set(
+      options.map(
+        (
+          option,
+        ) =>
+          option.id,
+      ),
+    );
+
+  const optionItemIds =
+    new Set(
+      optionExtension.items.map(
+        (
+          optionItem,
+        ) =>
+          optionItem.id,
+      ),
+    );
+
+  if (
+    optionItemIds.size !==
+      optionExtension.items.length ||
+    optionExtension.items.some(
+      (
+        optionItem,
+      ) =>
+        !reservationOptionIds.has(
+          optionItem.id,
+        ),
+    )
+  ) {
+    throw new Error(
+      "STAY_EXTENSION_OPERATIONAL_SCOPE_INVALID",
+    );
+  }
+
   const change =
     await db.reservationChange.create({
       data: {
@@ -1311,6 +1821,14 @@ export async function extendCheckedInHotelStay({
     where: {
       id:
         reservation.id,
+
+      businessId,
+
+      status:
+        reservation.status,
+
+      endAt:
+        reservation.endAt,
     },
 
     data: {
@@ -1329,6 +1847,12 @@ export async function extendCheckedInHotelStay({
     where: {
       id:
         reservationService.id,
+
+      reservationId:
+        reservation.id,
+
+      serviceId:
+        reservationService.serviceId,
     },
 
     data: {
@@ -1348,6 +1872,9 @@ export async function extendCheckedInHotelStay({
       where: {
         id:
           optionItem.id,
+
+        reservationId:
+          reservation.id,
       },
 
       data: {
