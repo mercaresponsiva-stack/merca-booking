@@ -6,7 +6,39 @@ import {
   resolveReservationServiceForResource,
 } from "@/lib/booking/resource-assignment-policy";
 import { NextRequest, NextResponse } from "next/server";
+
 import { prisma } from "@/lib/prisma";
+
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic = "force-dynamic";
+
+function privateJson(body: unknown, init: ResponseInit = {}) {
+  const headers = new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+
+  return NextResponse.json(body, {
+    ...init,
+    headers,
+  });
+}
+
+const RESOURCE_ASSIGNMENT_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
 
 export async function PATCH(
   request: NextRequest,
@@ -15,9 +47,52 @@ export async function PATCH(
   },
 ) {
   try {
-    const { id } = await context.params;
+    /*
+     * La autenticación ocurre antes de consultar
+     * cualquier reserva o procesar la mutación.
+     */
+    await requireAuthenticatedUser();
 
-    const body = await request.json();
+    const { id: reservationId } =
+      await context.params;
+
+    let rawBody: unknown;
+
+    try {
+      rawBody =
+        await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "El cuerpo de la solicitud debe ser JSON válido",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (
+      typeof rawBody !== "object" ||
+      rawBody === null ||
+      Array.isArray(rawBody)
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "El cuerpo de la solicitud es inválido",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const body =
+      rawBody as Record<string, unknown>;
 
     /*
      * Nombre nuevo:
@@ -26,7 +101,14 @@ export async function PATCH(
      * Compatibilidad temporal con la API del hotel:
      * roomId -> resourceId
      */
-    const resourceId = body.resourceId ?? body.roomId;
+    const resourceIdCandidate =
+      body.resourceId ??
+      body.roomId;
+
+    const resourceId =
+      typeof resourceIdCandidate === "string"
+        ? resourceIdCandidate.trim()
+        : "";
 
     /*
      * Para reservas con varios servicios podremos
@@ -36,14 +118,40 @@ export async function PATCH(
      * Para el hotel actual, normalmente existe solo
      * uno y puede omitirse.
      */
-    const requestedReservationServiceId = body.reservationServiceId ?? null;
+    let requestedReservationServiceId:
+      string | null = null;
+
+    if (
+      body.reservationServiceId !== undefined &&
+      body.reservationServiceId !== null
+    ) {
+      if (
+        typeof body.reservationServiceId !==
+        "string"
+      ) {
+        return privateJson(
+          {
+            success: false,
+            error:
+              "reservationServiceId debe ser una cadena válida",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      requestedReservationServiceId =
+        body.reservationServiceId.trim() ||
+        null;
+    }
 
     // ─────────────────────────────────────────────
     // 1. VALIDAR RESOURCE
     // ─────────────────────────────────────────────
 
     if (!resourceId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "resourceId o roomId es requerido",
@@ -58,15 +166,51 @@ export async function PATCH(
     // 2. ASIGNACIÓN SEGURA
     // ─────────────────────────────────────────────
 
+    const reservationScope =
+      await prisma.reservation.findUnique({
+        where: {
+          id:
+            reservationId,
+        },
+
+        select: {
+          businessId:
+            true,
+        },
+      });
+
+    if (!reservationScope) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "Reserva no encontrada",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    const access =
+      await requireBusinessAccess(
+        reservationScope.businessId,
+        RESOURCE_ASSIGNMENT_ALLOWED_ROLES,
+      );
+
     const result = await prisma.$transaction(
       async (tx) => {
         // ─────────────────────────────────────────
         // RESERVATION
         // ─────────────────────────────────────────
 
-        const reservation = await tx.reservation.findUnique({
+        const reservation = await tx.reservation.findFirst({
           where: {
-            id,
+            id:
+              reservationId,
+
+            businessId:
+              access.business.id,
           },
 
           include: {
@@ -83,6 +227,7 @@ export async function PATCH(
                     resource: {
                       select: {
                         id: true,
+                        businessId: true,
                         resourceTypeId: true,
                       },
                     },
@@ -97,6 +242,60 @@ export async function PATCH(
           throw new Error("RESERVATION_NOT_FOUND");
         }
 
+        /*
+         * La membresía se revalida dentro de la
+         * misma transacción Serializable que crea
+         * la asignación.
+         */
+        const actorMembership =
+          await tx.businessMembership.findFirst({
+            where: {
+              businessId:
+                access.business.id,
+
+              userId:
+                access.user.id,
+
+              isActive:
+                true,
+
+              role: {
+                in: [
+                  ...RESOURCE_ASSIGNMENT_ALLOWED_ROLES,
+                ],
+              },
+
+              user: {
+                is: {
+                  isActive:
+                    true,
+                },
+              },
+
+              business: {
+                is: {
+                  isActive:
+                    true,
+                },
+              },
+            },
+
+            select: {
+              user: {
+                select: {
+                  id:
+                    true,
+                },
+              },
+            },
+          });
+
+        if (!actorMembership) {
+          throw new Error(
+            "RESOURCE_ASSIGNMENT_ACTOR_NOT_VALID",
+          );
+        }
+
         // No tiene sentido asignar recursos a una
         // reserva finalizada o cancelada.
 
@@ -106,6 +305,242 @@ export async function PATCH(
 
         if (reservation.services.length === 0) {
           throw new Error("RESERVATION_HAS_NO_SERVICES");
+        }
+
+        /*
+         * Validamos el grafo operativo completo antes
+         * de utilizarlo para decidir la asignación.
+         *
+         * No confiamos únicamente en las relaciones
+         * anidadas porque una referencia histórica o
+         * corrupta podría apuntar a otro negocio.
+         */
+        const operationalServiceIds =
+          new Set<string>();
+
+        const operationalResourceTypeIds =
+          new Set<string>();
+
+        const operationalResourceIds =
+          new Set<string>();
+
+        let operationalScopeInvalid =
+          false;
+
+        for (
+          const reservationService of
+          reservation.services
+        ) {
+          operationalServiceIds.add(
+            reservationService.serviceId,
+          );
+
+          if (
+            reservationService.reservationId !==
+              reservation.id ||
+            reservationService.serviceId !==
+              reservationService.service.id ||
+            reservationService.service.businessId !==
+              access.business.id ||
+            !Number.isInteger(
+              reservationService.quantity,
+            ) ||
+            reservationService.quantity < 1
+          ) {
+            operationalScopeInvalid =
+              true;
+          }
+
+          const serviceResourceTypeIds =
+            new Set<string>();
+
+          for (
+            const requirement of
+            reservationService.service
+              .resourceTypes
+          ) {
+            operationalResourceTypeIds.add(
+              requirement.resourceTypeId,
+            );
+
+            serviceResourceTypeIds.add(
+              requirement.resourceTypeId,
+            );
+
+            if (
+              requirement.serviceId !==
+                reservationService.service.id ||
+              !Number.isInteger(
+                requirement.requiredQuantity,
+              ) ||
+              requirement.requiredQuantity < 1 ||
+              !Number.isSafeInteger(
+                reservationService.quantity *
+                  requirement.requiredQuantity,
+              )
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+          }
+
+          for (
+            const assignment of
+            reservationService.resources
+          ) {
+            operationalResourceIds.add(
+              assignment.resourceId,
+            );
+
+            const assignedResourceTypeId =
+              assignment.resource
+                .resourceTypeId;
+
+            if (assignedResourceTypeId) {
+              operationalResourceTypeIds.add(
+                assignedResourceTypeId,
+              );
+            }
+
+            if (
+              assignment.reservationId !==
+                reservation.id ||
+              assignment.reservationServiceId !==
+                reservationService.id ||
+              assignment.reservationOptionId !==
+                null ||
+              assignment.resourceId !==
+                assignment.resource.id ||
+              assignment.resource.businessId !==
+                access.business.id ||
+              !assignedResourceTypeId ||
+              !serviceResourceTypeIds.has(
+                assignedResourceTypeId,
+              )
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+          }
+        }
+
+        const authorizedServices =
+          operationalServiceIds.size === 0
+            ? []
+            : await tx.service.findMany({
+                where: {
+                  id: {
+                    in: [
+                      ...operationalServiceIds,
+                    ],
+                  },
+
+                  businessId:
+                    access.business.id,
+                },
+
+                select: {
+                  id:
+                    true,
+                },
+              });
+
+        const authorizedResourceTypes =
+          operationalResourceTypeIds.size === 0
+            ? []
+            : await tx.resourceType.findMany({
+                where: {
+                  id: {
+                    in: [
+                      ...operationalResourceTypeIds,
+                    ],
+                  },
+
+                  businessId:
+                    access.business.id,
+                },
+
+                select: {
+                  id:
+                    true,
+                },
+              });
+
+        const authorizedResources =
+          operationalResourceIds.size === 0
+            ? []
+            : await tx.resource.findMany({
+                where: {
+                  id: {
+                    in: [
+                      ...operationalResourceIds,
+                    ],
+                  },
+
+                  businessId:
+                    access.business.id,
+                },
+
+                select: {
+                  id:
+                    true,
+
+                  resourceTypeId:
+                    true,
+                },
+              });
+
+        if (
+          authorizedServices.length !==
+            operationalServiceIds.size ||
+          authorizedResourceTypes.length !==
+            operationalResourceTypeIds.size ||
+          authorizedResources.length !==
+            operationalResourceIds.size
+        ) {
+          operationalScopeInvalid =
+            true;
+        }
+
+        const authorizedResourceById =
+          new Map(
+            authorizedResources.map(
+              (resourceItem) => [
+                resourceItem.id,
+                resourceItem,
+              ],
+            ),
+          );
+
+        for (
+          const reservationService of
+          reservation.services
+        ) {
+          for (
+            const assignment of
+            reservationService.resources
+          ) {
+            const authorizedResource =
+              authorizedResourceById.get(
+                assignment.resourceId,
+              );
+
+            if (
+              !authorizedResource ||
+              authorizedResource.resourceTypeId !==
+                assignment.resource
+                  .resourceTypeId
+            ) {
+              operationalScopeInvalid =
+                true;
+            }
+          }
+        }
+
+        if (operationalScopeInvalid) {
+          throw new Error(
+            "RESERVATION_ROOM_OPERATIONAL_SCOPE_INVALID",
+          );
         }
 
         // ─────────────────────────────────────────
@@ -133,6 +568,17 @@ export async function PATCH(
 
         if (!resource.resourceTypeId || !resource.resourceType) {
           throw new Error("RESOURCE_TYPE_NOT_CONFIGURED");
+        }
+
+        if (
+          resource.businessId !==
+            access.business.id ||
+          resource.resourceType.businessId !==
+            access.business.id
+        ) {
+          throw new Error(
+            "RESERVATION_ROOM_OPERATIONAL_SCOPE_INVALID",
+          );
         }
 
         // ───────────────────────────────────────
@@ -247,6 +693,8 @@ export async function PATCH(
 
             reservationServiceId: reservationService.id,
 
+            reservationOptionId: null,
+
             resourceId: resource.id,
           },
 
@@ -282,7 +730,7 @@ export async function PATCH(
 
     const resource = result.assignment.resource;
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       reservation: {
@@ -342,10 +790,60 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
+    const errorCode =
+      error instanceof Error
+        ? error.message
+        : null;
+
+    if (
+      errorCode ===
+      "RESOURCE_ASSIGNMENT_ACTOR_NOT_VALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "El usuario ya no tiene autorización para asignar recursos en este negocio",
+        },
+        {
+          status: 403,
+        },
+      );
+    }
+
+    if (
+      errorCode ===
+      "RESERVATION_ROOM_OPERATIONAL_SCOPE_INVALID"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          error:
+            "No fue posible validar la integridad operativa de los recursos de la reserva.",
+        },
+        {
+          status: 500,
+        },
+      );
+    }
+
     console.error("PATCH reservation resource assignment error:", error);
 
     if (error instanceof Error && error.message === "RESERVATION_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Reserva no encontrada",
@@ -360,7 +858,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESERVATION_NOT_ASSIGNABLE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya no permite asignar recursos",
@@ -375,7 +873,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESERVATION_HAS_NO_SERVICES"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva no tiene servicios asociados",
@@ -387,7 +885,7 @@ export async function PATCH(
     }
 
     if (error instanceof Error && error.message === "RESOURCE_NOT_FOUND") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Habitación o recurso no encontrado o inactivo",
@@ -403,7 +901,7 @@ export async function PATCH(
       (error.message === "RESOURCE_NOT_ALLOWED_FOR_SERVICE" ||
         error.message === "RESERVATION_SERVICE_NOT_VALID")
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -419,7 +917,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESERVATION_SERVICE_REQUIRED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -436,7 +934,7 @@ export async function PATCH(
       (error.message === "RESOURCE_ALREADY_ASSIGNED" ||
         error.message === "RESOURCE_REQUIREMENT_ALREADY_SATISFIED")
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La reserva ya tiene el recurso requerido asignado",
@@ -451,7 +949,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESOURCE_ALREADY_OCCUPIED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La habitación ya está ocupada para esas fechas",
@@ -463,7 +961,7 @@ export async function PATCH(
     }
 
     if (error instanceof Error && error.message === "RESOURCE_BLOCKED") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "La habitación está bloqueada para esas fechas",
@@ -478,7 +976,7 @@ export async function PATCH(
       error instanceof Error &&
       error.message === "RESOURCE_TYPE_NOT_CONFIGURED"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El recurso no tiene un tipo configurado",
@@ -496,9 +994,12 @@ export async function PATCH(
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
-      error.code === "P2034"
+      (
+        error.code === "P2002" ||
+        error.code === "P2034"
+      )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -510,7 +1011,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible asignar la habitación",
