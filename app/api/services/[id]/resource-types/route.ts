@@ -2,7 +2,62 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { ACTIVE_RESERVATION_STATUSES } from "@/lib/booking/reservation-state";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const SERVICE_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 type RouteContext = {
   params: Promise<{
@@ -17,15 +72,47 @@ type RequirementInput = {
 
 export async function PUT(request: NextRequest, context: RouteContext) {
   try {
+    await requireAuthenticatedUser();
+
     const { id: serviceId } = await context.params;
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_SERVICE_REQUIREMENTS_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -36,8 +123,13 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      SERVICE_WRITE_ALLOWED_ROLES,
+    );
+
     if (!Array.isArray(body.requirements)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "requirements debe ser un arreglo",
@@ -59,7 +151,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       const requiredQuantity = Number(rawRequirement?.requiredQuantity);
 
       if (!resourceTypeId) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Cada requisito debe incluir resourceTypeId",
@@ -71,7 +163,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       }
 
       if (!Number.isInteger(requiredQuantity) || requiredQuantity < 1) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "requiredQuantity debe ser un entero mayor o igual a 1",
@@ -93,7 +185,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     );
 
     if (uniqueResourceTypeIds.size !== requirements.length) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -340,7 +432,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     );
 
     if (!result.ok) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
 
@@ -357,7 +449,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       );
     }
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       service: result.service,
@@ -365,12 +457,25 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       requirements: result.requirements,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PUT /api/services/[id]/resource-types error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
         case "BUSINESS_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Negocio no encontrado o inactivo",
@@ -381,7 +486,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           );
 
         case "SERVICE_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Servicio no encontrado para este negocio",
@@ -392,7 +497,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           );
 
         case "RESOURCE_TYPE_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Uno o más tipos de recurso no pertenecen a este negocio",
@@ -404,7 +509,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       }
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible actualizar los requisitos de recursos",
