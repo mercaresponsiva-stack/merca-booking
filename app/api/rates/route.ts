@@ -2,7 +2,68 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { dateOnlyToUtc, isValidDateOnly } from "@/lib/booking/datetime";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const RATE_READ_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+const RATE_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 function dateOnlyToUtcEndOfDay(value: string) {
   const date = dateOnlyToUtc(value);
@@ -12,6 +73,8 @@ function dateOnlyToUtcEndOfDay(value: string) {
 
 export async function GET(request: NextRequest) {
   try {
+    await requireAuthenticatedUser();
+
     const { searchParams } = request.nextUrl;
 
     const businessId = searchParams.get("businessId")?.trim() ?? "";
@@ -21,7 +84,7 @@ export async function GET(request: NextRequest) {
     const includeInactive = searchParams.get("includeInactive") === "true";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -31,6 +94,11 @@ export async function GET(request: NextRequest) {
         },
       );
     }
+
+    await requireBusinessAccess(
+      businessId,
+      RATE_READ_ALLOWED_ROLES,
+    );
 
     const business = await prisma.business.findFirst({
       where: {
@@ -45,7 +113,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -69,7 +137,7 @@ export async function GET(request: NextRequest) {
       });
 
       if (!service) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Servicio no encontrado para este negocio",
@@ -142,7 +210,7 @@ export async function GET(request: NextRequest) {
       ],
     });
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -154,9 +222,22 @@ export async function GET(request: NextRequest) {
       items: rates,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/rates error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener las tarifas",
@@ -170,7 +251,39 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    await requireAuthenticatedUser();
+
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_RATE_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
@@ -193,7 +306,7 @@ export async function POST(request: NextRequest) {
     const isActive = body.isActive;
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -204,8 +317,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      RATE_WRITE_ALLOWED_ROLES,
+    );
+
     if (!serviceId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "serviceId es obligatorio",
@@ -217,7 +335,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!name) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El nombre de la tarifa es obligatorio",
@@ -229,7 +347,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!isValidDateOnly(startDateInput) || !isValidDateOnly(endDateInput)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "startDate y endDate deben usar el formato YYYY-MM-DD",
@@ -245,7 +363,7 @@ export async function POST(request: NextRequest) {
     const endDate = dateOnlyToUtcEndOfDay(endDateInput);
 
     if (endDate < startDate) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "endDate no puede ser anterior a startDate",
@@ -257,7 +375,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!Number.isFinite(weekdayPrice) || weekdayPrice < 0) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "weekdayPrice debe ser un número mayor o igual a 0",
@@ -269,7 +387,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!Number.isFinite(weekendPrice) || weekendPrice < 0) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "weekendPrice debe ser un número mayor o igual a 0",
@@ -281,7 +399,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (typeof isActive !== "boolean") {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "isActive debe ser booleano",
@@ -416,7 +534,7 @@ export async function POST(request: NextRequest) {
     );
 
     if (!result.ok) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
 
@@ -433,7 +551,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
         rate: result.rate,
@@ -443,12 +561,25 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("POST /api/rates error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
         case "BUSINESS_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Negocio no encontrado o inactivo",
@@ -459,7 +590,7 @@ export async function POST(request: NextRequest) {
           );
 
         case "SERVICE_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Servicio no encontrado para este negocio",
@@ -471,7 +602,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible crear la tarifa",
