@@ -1,6 +1,62 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const BLOCK_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 const BLOCK_SCOPES = [
   "BUSINESS",
@@ -20,9 +76,41 @@ export async function PATCH(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_BLOCK_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
@@ -40,7 +128,7 @@ export async function PATCH(
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -51,8 +139,13 @@ export async function PATCH(
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      BLOCK_ALLOWED_ROLES,
+    );
+
     if (!BLOCK_SCOPES.includes(scope as BlockScope)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Alcance de bloqueo inválido",
@@ -66,7 +159,7 @@ export async function PATCH(
     const blockScope = scope as BlockScope;
 
     if (blockScope !== "BUSINESS" && !targetId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "targetId es obligatorio para este alcance",
@@ -78,7 +171,7 @@ export async function PATCH(
     }
 
     if (blockScope === "BUSINESS" && targetId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Un bloqueo de negocio no debe tener targetId",
@@ -90,7 +183,7 @@ export async function PATCH(
     }
 
     if (!startAtRaw || !endAtRaw) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "startAt y endAt son obligatorios",
@@ -106,7 +199,7 @@ export async function PATCH(
     const endAt = new Date(endAtRaw);
 
     if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Las fechas del bloqueo son inválidas",
@@ -118,7 +211,7 @@ export async function PATCH(
     }
 
     if (startAt >= endAt) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -142,7 +235,7 @@ export async function PATCH(
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -165,7 +258,7 @@ export async function PATCH(
     });
 
     if (!existingBlock) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Bloqueo no encontrado para este negocio",
@@ -195,7 +288,7 @@ export async function PATCH(
       });
 
       if (!service) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Servicio no encontrado para este negocio",
@@ -222,7 +315,7 @@ export async function PATCH(
       });
 
       if (!resourceType) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Tipo de recurso no encontrado para este negocio",
@@ -249,7 +342,7 @@ export async function PATCH(
       });
 
       if (!resource) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Recurso no encontrado para este negocio",
@@ -322,7 +415,7 @@ export async function PATCH(
       },
     });
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       block: {
@@ -331,9 +424,22 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PATCH /api/blocks/[id] error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible actualizar el bloqueo",
@@ -354,13 +460,15 @@ export async function DELETE(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
     const businessId =
       request.nextUrl.searchParams.get("businessId")?.trim() ?? "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -370,6 +478,11 @@ export async function DELETE(
         },
       );
     }
+
+    await requireBusinessAccess(
+      businessId,
+      BLOCK_ALLOWED_ROLES,
+    );
 
     const business = await prisma.business.findFirst({
       where: {
@@ -383,7 +496,7 @@ export async function DELETE(
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -418,7 +531,7 @@ export async function DELETE(
     });
 
     if (!block) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Bloqueo no encontrado para este negocio",
@@ -437,7 +550,7 @@ export async function DELETE(
     });
 
     if (deleted.count !== 1) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El bloqueo ya no existe",
@@ -448,14 +561,27 @@ export async function DELETE(
       );
     }
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
       deletedBlock: block,
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("DELETE /api/blocks/[id] error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible eliminar el bloqueo",

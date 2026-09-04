@@ -1,6 +1,62 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const BLOCK_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 const BLOCK_SCOPES = [
   "BUSINESS",
@@ -47,6 +103,8 @@ function parsePositiveInteger(value: string | null, fallback: number) {
 
 export async function GET(request: NextRequest) {
   try {
+    await requireAuthenticatedUser();
+
     const { searchParams } = request.nextUrl;
 
     const businessId = searchParams.get("businessId")?.trim() ?? "";
@@ -56,7 +114,7 @@ export async function GET(request: NextRequest) {
     const pageSize = parsePositiveInteger(searchParams.get("pageSize"), 50);
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -67,8 +125,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      BLOCK_ALLOWED_ROLES,
+    );
+
     if (page === null || pageSize === null || pageSize > 100) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Paginación inválida",
@@ -92,7 +155,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -174,7 +237,7 @@ export async function GET(request: NextRequest) {
 
     const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -197,9 +260,22 @@ export async function GET(request: NextRequest) {
       })),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/blocks error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener los bloqueos",
@@ -213,7 +289,39 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    await requireAuthenticatedUser();
+
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_BLOCK_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
@@ -231,7 +339,7 @@ export async function POST(request: NextRequest) {
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -242,8 +350,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      BLOCK_ALLOWED_ROLES,
+    );
+
     if (!BLOCK_SCOPES.includes(scope as BlockScope)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Alcance de bloqueo inválido",
@@ -257,7 +370,7 @@ export async function POST(request: NextRequest) {
     const blockScope = scope as BlockScope;
 
     if (blockScope !== "BUSINESS" && !targetId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "targetId es obligatorio para este alcance",
@@ -269,7 +382,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (blockScope === "BUSINESS" && targetId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Un bloqueo de negocio no debe tener targetId",
@@ -281,7 +394,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!startAtRaw || !endAtRaw) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "startAt y endAt son obligatorios",
@@ -297,7 +410,7 @@ export async function POST(request: NextRequest) {
     const endAt = new Date(endAtRaw);
 
     if (Number.isNaN(startAt.getTime()) || Number.isNaN(endAt.getTime())) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Las fechas del bloqueo son inválidas",
@@ -309,7 +422,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (startAt >= endAt) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -334,7 +447,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -364,7 +477,7 @@ export async function POST(request: NextRequest) {
       });
 
       if (!service) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Servicio no encontrado para este negocio",
@@ -391,7 +504,7 @@ export async function POST(request: NextRequest) {
       });
 
       if (!resourceType) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Tipo de recurso no encontrado para este negocio",
@@ -418,7 +531,7 @@ export async function POST(request: NextRequest) {
       });
 
       if (!resource) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "Recurso no encontrado para este negocio",
@@ -489,7 +602,7 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
 
@@ -504,9 +617,22 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("POST /api/blocks error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible crear el bloqueo",
