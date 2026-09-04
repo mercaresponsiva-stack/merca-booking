@@ -1,6 +1,61 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const BUSINESS_OPTION_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 type RouteContext = {
   params: Promise<{
@@ -227,12 +282,14 @@ function parseServiceOption(value: unknown): ParsedServiceOption {
 
 export async function PUT(request: NextRequest, context: RouteContext) {
   try {
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
     const optionId = id.trim();
 
     if (!optionId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El id de la opción es obligatorio",
@@ -243,13 +300,43 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_BUSINESS_OPTION_SERVICES_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -260,8 +347,13 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      BUSINESS_OPTION_WRITE_ALLOWED_ROLES,
+    );
+
     if (!Array.isArray(body.services)) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "services debe ser un arreglo",
@@ -320,7 +412,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           INVALID_IS_ACTIVE: "isActive debe ser booleano.",
         };
 
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error:
@@ -341,7 +433,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     );
 
     if (new Set(serviceIds).size !== serviceIds.length) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "No puedes enviar el mismo servicio más de una vez.",
@@ -642,7 +734,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       },
     );
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business: result.business,
@@ -703,12 +795,25 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       },
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PUT /api/business-options/[id]/services error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
         case "OPTION_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Opción no encontrada para este negocio.",
@@ -719,7 +824,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           );
 
         case "BUSINESS_NOT_ACTIVE":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "El negocio está inactivo.",
@@ -730,7 +835,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           );
 
         case "SERVICE_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -742,7 +847,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           );
 
         case "ACTIVE_RESERVATION_OPTIONS_EXIST":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -755,7 +860,7 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       }
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible configurar la opción en los servicios.",

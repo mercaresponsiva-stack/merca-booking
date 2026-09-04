@@ -3,7 +3,68 @@
   NextResponse,
 } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const BUSINESS_OPTION_READ_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+const BUSINESS_OPTION_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 function optionalText(
   value: unknown,
@@ -51,6 +112,8 @@ export async function GET(
   request: NextRequest,
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const businessId =
       request.nextUrl.searchParams
         .get("businessId")
@@ -62,7 +125,7 @@ export async function GET(
       "true";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -73,6 +136,11 @@ export async function GET(
         },
       );
     }
+
+    await requireBusinessAccess(
+      businessId,
+      BUSINESS_OPTION_READ_ALLOWED_ROLES,
+    );
 
     const business =
       await prisma.business.findFirst({
@@ -88,7 +156,7 @@ export async function GET(
       });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -240,7 +308,7 @@ export async function GET(
         },
       });
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -377,12 +445,25 @@ export async function GET(
         ),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error(
       "GET /api/business-options error:",
       error,
     );
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error:
@@ -399,8 +480,39 @@ export async function POST(
   request: NextRequest,
 ) {
   try {
-    const body =
-      await request.json();
+    await requireAuthenticatedUser();
+
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_BUSINESS_OPTION_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId ===
@@ -440,7 +552,7 @@ export async function POST(
             true;
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -452,8 +564,13 @@ export async function POST(
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      BUSINESS_OPTION_WRITE_ALLOWED_ROLES,
+    );
+
     if (!name) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -466,7 +583,7 @@ export async function POST(
     }
 
     if (!slug) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -483,7 +600,7 @@ export async function POST(
         slug,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -587,7 +704,7 @@ export async function POST(
         },
       );
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
 
@@ -615,6 +732,19 @@ export async function POST(
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error(
       "POST /api/business-options error:",
       error,
@@ -627,7 +757,7 @@ export async function POST(
         error.message
       ) {
         case "BUSINESS_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -639,7 +769,7 @@ export async function POST(
           );
 
         case "OPTION_SLUG_ALREADY_EXISTS":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error:
@@ -657,7 +787,7 @@ export async function POST(
         error,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error:
@@ -669,7 +799,7 @@ export async function POST(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error:
