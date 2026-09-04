@@ -21,6 +21,7 @@ import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
+import { isPaymentOption } from "@/lib/booking/payment-option";
 import { calculateReservationFinancialState } from "@/lib/booking/reservation-financial-state";
 
 import {
@@ -47,9 +48,6 @@ function privateJson(body: unknown, init: ResponseInit = {}) {
   });
 }
 
-const PAYMENT_OPTIONS = ["FULL", "DEPOSIT_50"] as const;
-
-type PaymentOption = (typeof PAYMENT_OPTIONS)[number];
 
 const RESERVATION_SOURCES = [
   "WEBSITE",
@@ -645,7 +643,7 @@ export async function POST(request: NextRequest) {
 
     const specialRequests = body.specialRequests ?? null;
 
-    const paymentOption = body.paymentOption as PaymentOption | undefined;
+    const paymentOption = body.paymentOption;
 
     const source = (body.source ?? "WEBSITE") as ReservationSource;
 
@@ -855,12 +853,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!paymentOption || !PAYMENT_OPTIONS.includes(paymentOption)) {
+    if (!isPaymentOption(paymentOption)) {
       return privateJson(
         {
           success: false,
           error:
-            "Debes seleccionar una modalidad de pago válida: FULL o DEPOSIT_50",
+            "Debes seleccionar una modalidad de pago válida",
         },
         {
           status: 400,
@@ -1005,6 +1003,37 @@ export async function POST(request: NextRequest) {
 
     const result = await prisma.$transaction(
       async (tx) => {
+        /*
+         * La modalidad se valida contra la configuración
+         * vigente solamente al crear la reserva.
+         *
+         * Una vez guardada, Reservation.paymentOption es
+         * la instantánea contractual que conservarán los
+         * flujos posteriores aunque el negocio cambie su
+         * configuración para nuevas reservas.
+         */
+        const paymentConfiguration =
+          await tx.business.findFirst({
+            where: {
+              id: business.id,
+              isActive: true,
+
+              enabledPaymentOptions: {
+                has: paymentOption,
+              },
+            },
+
+            select: {
+              id: true,
+            },
+          });
+
+        if (!paymentConfiguration) {
+          throw new Error(
+            "PAYMENT_OPTION_NOT_ENABLED",
+          );
+        }
+
         // ─────────────────────────────────────────
         // SERVICE
         //
@@ -1751,6 +1780,24 @@ export async function POST(request: NextRequest) {
         },
         {
           status: error.status,
+        },
+      );
+    }
+
+    if (
+      error instanceof Error &&
+      error.message ===
+        "PAYMENT_OPTION_NOT_ENABLED"
+    ) {
+      return privateJson(
+        {
+          success: false,
+          code: error.message,
+          error:
+            "La modalidad de pago seleccionada ya no está habilitada para este negocio",
+        },
+        {
+          status: 409,
         },
       );
     }

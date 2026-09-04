@@ -3,6 +3,10 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
+import {
+  getPaymentOptionLabel,
+  type PaymentOptionValue,
+} from "@/lib/booking/payment-option";
 import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
 import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
@@ -31,7 +35,7 @@ type ReservationListItem = {
   adults: number | null;
   children: number | null;
   total: number;
-  paymentOption: "FULL" | "DEPOSIT_50" | null;
+  paymentOption: PaymentOptionValue;
 
   customer: {
     id: string;
@@ -514,7 +518,7 @@ export default function ReservationsPage() {
                         </Link>
 
                         <p className="mt-1 text-xs text-zinc-500">
-                          {reservation.paymentOption}
+                          {getPaymentOptionLabel(reservation.paymentOption)}
                         </p>
                       </td>
 

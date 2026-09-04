@@ -2,6 +2,10 @@ import { calculateReservationFinancialState } from "@/lib/booking/reservation-fi
 import { validatePendingReservationPaymentWindow } from "@/lib/booking/reservation-expiration-deadline";
 import { isReservationPayable } from "@/lib/booking/reservation-state";
 import { calculatePaymentSummary } from "@/lib/booking/payment-summary";
+import {
+  isDepositPaymentOption,
+  isPaymentOption,
+} from "@/lib/booking/payment-option";
 import { fromCents, toCents } from "@/lib/booking/money";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -403,13 +407,10 @@ export async function POST(
             new Date(),
         });
 
-        // Las reservas nuevas deben tener
-        // modalidad de pago definida.
+        // Las reservas nuevas deben conservar una
+        // modalidad de pago reconocida en su contrato.
 
-        if (
-          reservation.paymentOption !== "FULL" &&
-          reservation.paymentOption !== "DEPOSIT_50"
-        ) {
+        if (!isPaymentOption(reservation.paymentOption)) {
           throw new Error("PAYMENT_OPTION_NOT_CONFIGURED");
         }
 
@@ -461,12 +462,16 @@ export async function POST(
         // CASH
         //
         // Solo se permite para cubrir el saldo
-        // restante de DEPOSIT_50 y únicamente
-        // durante CHECK_IN.
+        // restante de una modalidad con anticipo
+        // y únicamente durante CHECK_IN.
         // ─────────────────────────────────────
 
         if (method === "CASH") {
-          if (reservation.paymentOption !== "DEPOSIT_50") {
+          if (
+            !isDepositPaymentOption(
+              reservation.paymentOption,
+            )
+          ) {
             throw new Error("CASH_ONLY_FOR_DEPOSIT_BALANCE");
           }
 
@@ -555,7 +560,7 @@ export async function POST(
         }
 
         // ─────────────────────────────────────
-        // DEPOSIT_50
+        // DEPOSIT_10 / DEPOSIT_25 / DEPOSIT_50
         // ─────────────────────────────────────
         else {
           if (paymentSummary.initialPaymentSatisfied) {
@@ -570,7 +575,7 @@ export async function POST(
           }
 
           /*
-           * DEPOSIT_50 puede requerir más de un pago.
+           * Un anticipo porcentual puede requerir más de un pago.
            *
            * Ejemplo:
            *
@@ -908,7 +913,7 @@ export async function POST(
         {
           success: false,
           error:
-            "El anticipo del 50% ya fue pagado. El saldo restante se paga en efectivo durante el check-in.",
+            "El anticipo requerido ya fue pagado. El saldo restante se paga en efectivo durante el check-in.",
         },
         {
           status: 409,
@@ -924,7 +929,7 @@ export async function POST(
         {
           success: false,
           error:
-            "El efectivo solo puede utilizarse para cubrir el saldo restante de una reserva con anticipo del 50%",
+            "El efectivo solo puede utilizarse para cubrir el saldo restante de una reserva con anticipo",
         },
         {
           status: 400,
@@ -953,7 +958,7 @@ export async function POST(
         {
           success: false,
           error:
-            "El anticipo del 50% debe estar pagado antes de registrar el saldo en efectivo",
+            "El anticipo requerido debe estar pagado antes de registrar el saldo en efectivo",
         },
         {
           status: 409,

@@ -1,8 +1,13 @@
 import { fromCents, toCents } from "@/lib/booking/money";
 
+import {
+  getRequiredInitialPaymentCents,
+  type PaymentOptionValue,
+} from "@/lib/booking/payment-option";
+
 import type { ReservationStatus } from "@/lib/booking/reservation-state";
 
-export type ReschedulePaymentOption = "FULL" | "DEPOSIT_50" | null;
+export type ReschedulePaymentOption = PaymentOptionValue;
 
 type ValidateRescheduleInput = {
   status: ReservationStatus;
@@ -109,15 +114,11 @@ export function resolveRescheduleFinancialImpact({
    */
   const balanceCents = Math.max(newTotalCents - netPaidCents, 0);
 
-  let requiredInitialPaymentCents = 0;
-
-  if (paymentOption === "FULL") {
-    requiredInitialPaymentCents = newTotalCents;
-  }
-
-  if (paymentOption === "DEPOSIT_50") {
-    requiredInitialPaymentCents = Math.round(newTotalCents / 2);
-  }
+  const requiredInitialPaymentCents =
+    getRequiredInitialPaymentCents(
+      newTotalCents,
+      paymentOption,
+    );
 
   /*
    * paymentOption = null corresponde
@@ -128,7 +129,7 @@ export function resolveRescheduleFinancialImpact({
    * que ese contrato nunca tuvo.
    */
   const initialPaymentShortfallCents =
-    paymentOption === null
+    requiredInitialPaymentCents === null
       ? 0
       : Math.max(requiredInitialPaymentCents - netPaidCents, 0);
 
@@ -150,7 +151,7 @@ export function resolveRescheduleFinancialImpact({
    */
   if (
     currentStatus === "CONFIRMED" &&
-    paymentOption !== null &&
+    requiredInitialPaymentCents !== null &&
     initialPaymentShortfallCents > 0
   ) {
     nextStatus = "PENDING";
@@ -170,7 +171,9 @@ export function resolveRescheduleFinancialImpact({
     overpayment: fromCents(overpaymentCents),
 
     requiredInitialPayment:
-      paymentOption === null ? null : fromCents(requiredInitialPaymentCents),
+      requiredInitialPaymentCents === null
+        ? null
+        : fromCents(requiredInitialPaymentCents),
 
     initialPaymentShortfall: fromCents(initialPaymentShortfallCents),
 

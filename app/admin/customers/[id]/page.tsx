@@ -4,6 +4,10 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
+import {
+  getPaymentOptionLabel,
+  type PaymentOptionValue,
+} from "@/lib/booking/payment-option";
 import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
 
 type ReservationStatus =
@@ -24,7 +28,7 @@ type ReservationSource =
   | "AIRBNB"
   | "OTHER";
 
-type PaymentOption = "FULL" | "DEPOSIT_50" | null;
+
 
 type ReservationResource = {
   assignmentId: string;
@@ -60,7 +64,7 @@ type CustomerReservation = {
   subtotal: number;
   total: number;
 
-  paymentOption: PaymentOption;
+  paymentOption: PaymentOptionValue;
 
   specialRequests: string | null;
 
@@ -174,18 +178,7 @@ function getSourceLabel(source: ReservationSource) {
   }
 }
 
-function getPaymentOptionLabel(paymentOption: PaymentOption) {
-  switch (paymentOption) {
-    case "FULL":
-      return "Pago completo";
 
-    case "DEPOSIT_50":
-      return "Anticipo 50 %";
-
-    default:
-      return "Sin modalidad registrada";
-  }
-}
 
 export default function CustomerDetailPage() {
   const params = useParams<{

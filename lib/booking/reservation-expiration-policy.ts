@@ -1,5 +1,7 @@
 import { toCents } from "@/lib/booking/money";
 
+import type { PaymentOptionValue } from "@/lib/booking/payment-option";
+
 import type { ReservationStatus } from "@/lib/booking/reservation-state";
 
 type ReservationExpirationTimestamp =
@@ -7,9 +9,7 @@ type ReservationExpirationTimestamp =
   | string;
 
 type ReservationExpirationPaymentOption =
-  | "FULL"
-  | "DEPOSIT_50"
-  | null;
+  PaymentOptionValue;
 
 type ReservationExpirationPaymentSummary = {
   pending: number;

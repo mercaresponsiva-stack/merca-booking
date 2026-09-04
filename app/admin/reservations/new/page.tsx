@@ -4,9 +4,13 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import {
+  DEFAULT_ENABLED_PAYMENT_OPTIONS,
+  getPaymentOptionLabel,
+  isPaymentOption,
+  type PaymentOption,
+} from "@/lib/booking/payment-option";
 import { DEV_BUSINESS_ID as BUSINESS_ID } from "@/lib/config/dev-context";
-
-type PaymentOption = "FULL" | "DEPOSIT_50";
 
 type ReservationSource =
   | "WEBSITE"
@@ -57,6 +61,16 @@ type CustomersResponse = {
   customers: Customer[];
 };
 
+type PaymentOptionsResponse = {
+  success: true;
+
+  business: {
+    id: string;
+    name: string;
+    enabledPaymentOptions: PaymentOption[];
+  };
+};
+
 type CreateReservationResponse = {
   success: true;
 
@@ -104,7 +118,7 @@ const INITIAL_FORM: FormState = {
   adults: "1",
   children: "0",
 
-  paymentOption: "DEPOSIT_50",
+  paymentOption: DEFAULT_ENABLED_PAYMENT_OPTIONS[0],
 
   source: "PHONE",
 
@@ -160,6 +174,15 @@ export default function NewReservationPage() {
 
   const [businessName, setBusinessName] = useState("");
 
+  const [enabledPaymentOptions, setEnabledPaymentOptions] =
+    useState<PaymentOption[]>([]);
+
+  const [loadingPaymentOptions, setLoadingPaymentOptions] =
+    useState(true);
+
+  const [paymentOptionsError, setPaymentOptionsError] =
+    useState<string | null>(null);
+
   const [loadingServices, setLoadingServices] = useState(true);
 
   const [servicesError, setServicesError] = useState<string | null>(null);
@@ -212,8 +235,95 @@ export default function NewReservationPage() {
   }, []);
 
   useEffect(() => {
-    void loadServices();
+    void Promise.resolve().then(
+      () => loadServices(),
+    );
   }, [loadServices]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadPaymentOptions() {
+      try {
+        const response = await fetch(
+          `/api/businesses/${BUSINESS_ID}/payment-options`,
+          {
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+
+        const result: unknown =
+          await response.json();
+
+        if (!response.ok) {
+          const message =
+            typeof result === "object" &&
+            result !== null &&
+            "error" in result &&
+            typeof result.error === "string"
+              ? result.error
+              : "No fue posible cargar las modalidades de pago";
+
+          throw new Error(message);
+        }
+
+        const data =
+          result as PaymentOptionsResponse;
+
+        const firstPaymentOption =
+          data.business.enabledPaymentOptions[0];
+
+        if (!firstPaymentOption) {
+          throw new Error(
+            "El negocio no tiene modalidades de pago habilitadas",
+          );
+        }
+
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setEnabledPaymentOptions(
+          data.business.enabledPaymentOptions,
+        );
+
+        setForm((current) =>
+          data.business.enabledPaymentOptions.includes(
+            current.paymentOption,
+          )
+            ? current
+            : {
+                ...current,
+                paymentOption: firstPaymentOption,
+              },
+        );
+      } catch (error) {
+        if (
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setPaymentOptionsError(
+          error instanceof Error
+            ? error.message
+            : "No fue posible cargar las modalidades de pago",
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoadingPaymentOptions(false);
+        }
+      }
+    }
+
+    void loadPaymentOptions();
+
+    return () => {
+      controller.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (customerMode !== "EXISTING") {
@@ -223,11 +333,15 @@ export default function NewReservationPage() {
     const query = customerQuery.trim();
 
     if (query.length < 2) {
-      setCustomerResults([]);
-      setCustomerLoading(false);
-      setCustomerError(null);
+      const resetTimeout = window.setTimeout(() => {
+        setCustomerResults([]);
+        setCustomerLoading(false);
+        setCustomerError(null);
+      }, 0);
 
-      return;
+      return () => {
+        window.clearTimeout(resetTimeout);
+      };
     }
 
     const controller = new AbortController();
@@ -395,6 +509,21 @@ export default function NewReservationPage() {
     event.preventDefault();
 
     if (!canSubmit) {
+      return;
+    }
+
+    if (
+      loadingPaymentOptions ||
+      paymentOptionsError ||
+      !enabledPaymentOptions.includes(
+        form.paymentOption,
+      )
+    ) {
+      setSubmitError(
+        paymentOptionsError ??
+          "Espera mientras se cargan las modalidades de pago disponibles",
+      );
+
       return;
     }
 
@@ -863,23 +992,48 @@ export default function NewReservationPage() {
               <span className="font-medium">Modalidad de pago *</span>
 
               <select
-                value={form.paymentOption}
+                value={
+                  loadingPaymentOptions
+                    ? ""
+                    : form.paymentOption
+                }
+                disabled={
+                  loadingPaymentOptions ||
+                  paymentOptionsError !== null
+                }
                 onChange={(event) => {
                   const value = event.target.value;
 
-                  if (value === "FULL" || value === "DEPOSIT_50") {
+                  if (
+                    isPaymentOption(value) &&
+                    enabledPaymentOptions.includes(value)
+                  ) {
                     setForm((current) => ({
                       ...current,
                       paymentOption: value,
                     }));
                   }
                 }}
-                className="h-10 rounded-lg border border-zinc-300 bg-white px-3"
+                className="h-10 rounded-lg border border-zinc-300 bg-white px-3 disabled:cursor-not-allowed disabled:bg-zinc-100"
               >
-                <option value="DEPOSIT_50">Anticipo 50 %</option>
-
-                <option value="FULL">Pago completo</option>
+                {loadingPaymentOptions ? (
+                  <option value="">
+                    Cargando modalidades…
+                  </option>
+                ) : (
+                  enabledPaymentOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {getPaymentOptionLabel(option)}
+                    </option>
+                  ))
+                )}
               </select>
+
+              {paymentOptionsError && (
+                <span className="text-xs text-red-700">
+                  {paymentOptionsError}
+                </span>
+              )}
             </label>
 
             <label className="flex flex-col gap-2 text-sm">

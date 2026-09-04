@@ -36,6 +36,11 @@ model Business {
   // conserva inventario mientras espera pago.
   pendingReservationHoldMinutes Int @default(30)
 
+  // Modalidades que el negocio ofrece en reservas nuevas.
+  // El orden del arreglo define el orden de presentación.
+  // Cada Reservation conserva su elección como snapshot.
+  enabledPaymentOptions PaymentOption[] @default([DEPOSIT_50, FULL])
+
   // Configuración general
   isActive Boolean @default(true)
 
@@ -1048,6 +1053,8 @@ enum PaymentMethod {
 enum PaymentOption {
   FULL
   DEPOSIT_50
+  DEPOSIT_25
+  DEPOSIT_10
 }
 
 enum PaymentStatus {

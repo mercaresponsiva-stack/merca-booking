@@ -5,6 +5,11 @@ import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 import { zonedDateTimeToUtc } from "@/lib/booking/datetime";
+import {
+  getPaymentOptionLabel,
+  isDepositPaymentOption,
+  type PaymentOptionValue,
+} from "@/lib/booking/payment-option";
 import { isReservationCheckoutDue } from "@/lib/booking/reservation-checkout-timing";
 import { isReservationCheckinDue } from "@/lib/booking/reservation-checkin-policy";
 import { isReservationNoShowDue } from "@/lib/booking/reservation-no-show-policy";
@@ -410,7 +415,7 @@ type ReservationDetailResponse = {
     children: number | null;
     subtotal: number;
     total: number;
-    paymentOption: string | null;
+    paymentOption: PaymentOptionValue;
     retractoEligible: boolean;
     specialRequests: string | null;
     createdAt: string;
@@ -553,7 +558,7 @@ type ReservationDetailResponse = {
     netPaid: number;
     balance: number;
     isPaid: boolean;
-    paymentOption: string | null;
+    paymentOption: PaymentOptionValue;
     requiredInitialPayment: number | null;
     initialPaymentRemaining: number | null;
     initialPaymentSatisfied: boolean;
@@ -644,7 +649,7 @@ type RescheduleResponse = {
     endAt: string;
     subtotal: number;
     total: number;
-    paymentOption: string | null;
+    paymentOption: PaymentOptionValue;
   };
 
   pricing: {
@@ -738,7 +743,7 @@ type StayExtensionResponse = {
     endAt: string;
     subtotal: number;
     total: number;
-    paymentOption: string | null;
+    paymentOption: PaymentOptionValue;
   };
 
   pricing: {
@@ -776,7 +781,7 @@ type CheckoutResponse = {
     endAt: string;
     subtotal: number;
     total: number;
-    paymentOption: string | null;
+    paymentOption: PaymentOptionValue;
   };
 
   actor: {
@@ -4626,7 +4631,7 @@ export default function ReservationDetailPage() {
       availablePaymentMethods.push("BANK_TRANSFER");
     }
 
-    if (reservation.paymentOption === "DEPOSIT_50") {
+    if (isDepositPaymentOption(reservation.paymentOption)) {
       if (!paymentSummary.initialPaymentSatisfied) {
         availablePaymentMethods.push("BANK_TRANSFER");
       } else if (reservation.status === "CHECKED_IN") {
@@ -4640,7 +4645,7 @@ export default function ReservationDetailPage() {
   const calculatedPaymentAmount =
     paymentMethod === "CASH"
       ? financialState.amountDue
-      : reservation.paymentOption === "DEPOSIT_50"
+      : isDepositPaymentOption(reservation.paymentOption)
         ? (paymentSummary.initialPaymentRemaining ?? 0)
         : financialState.amountDue;
 
@@ -6034,7 +6039,7 @@ export default function ReservationDetailPage() {
                 </p>
 
                 <p className="mt-2 font-medium">
-                  {reservation.paymentOption ?? "Histórica"}
+                  {getPaymentOptionLabel(reservation.paymentOption)}
                 </p>
 
                 <p className="mt-1 text-sm text-zinc-500">
@@ -8420,7 +8425,7 @@ export default function ReservationDetailPage() {
                 <p>
                   Modalidad:{" "}
                   <span className="font-medium text-zinc-900">
-                    {reservation.paymentOption}
+                    {getPaymentOptionLabel(reservation.paymentOption)}
                   </span>
                 </p>
 

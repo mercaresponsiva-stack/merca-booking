@@ -232,6 +232,24 @@ export default async function AdminLayout({
                 </svg>
                 Clientes
               </Link>
+              <Link
+                href="/admin/settings/payment-options"
+                className="flex min-w-fit items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium text-zinc-300 transition hover:bg-white/10 hover:text-white"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <rect x="3" y="6" width="18" height="12" rx="2" />
+                  <path d="M3 10h18" />
+                  <path d="M7 15h3" />
+                </svg>
+                Pagos
+              </Link>
             </nav>
 
             <div className="hidden border-t border-zinc-800 p-4 lg:block">

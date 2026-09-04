@@ -1,6 +1,13 @@
-import { calculateHalfCents, fromCents, toCents } from "@/lib/booking/money";
+import { fromCents, toCents } from "@/lib/booking/money";
 
-export type PaymentOptionValue = "FULL" | "DEPOSIT_50" | null;
+import {
+  getRequiredInitialPaymentCents,
+  isDepositPaymentOption,
+  type PaymentOptionValue,
+} from "@/lib/booking/payment-option";
+
+export { getRequiredInitialPaymentCents } from "@/lib/booking/payment-option";
+export type { PaymentOptionValue } from "@/lib/booking/payment-option";
 
 type RefundForSummary = {
   amount: unknown;
@@ -29,24 +36,10 @@ type CalculatePaymentSummaryInput = {
   payments: PaymentForSummary[];
 };
 
-export function getRequiredInitialPaymentCents(
-  totalCents: number,
-  paymentOption: PaymentOptionValue,
-) {
-  if (paymentOption === "FULL") {
-    return totalCents;
-  }
-
-  if (paymentOption === "DEPOSIT_50") {
-    return calculateHalfCents(totalCents);
-  }
-
-  /*
-   * Reservas históricas anteriores
-   * a PaymentOption.
-   */
-  return null;
-}
+/*
+ * El resolver de anticipo se reexporta para conservar
+ * compatibilidad con consumidores existentes.
+ */
 
 export function calculatePaymentSummary({
   total,
@@ -180,7 +173,7 @@ export function calculatePaymentSummary({
       : netPaidCents >= requiredInitialPaymentCents;
 
   const balanceDueAt =
-    paymentOption === "DEPOSIT_50" &&
+    isDepositPaymentOption(paymentOption) &&
     initialPaymentSatisfied &&
     balanceCents > 0
       ? "CHECK_IN"
