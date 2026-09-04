@@ -1,14 +1,77 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const RESOURCE_TYPE_READ_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+const RESOURCE_TYPE_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 export async function GET(request: NextRequest) {
   try {
+    await requireAuthenticatedUser();
+
     const businessId =
       request.nextUrl.searchParams.get("businessId")?.trim() ?? "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -18,6 +81,11 @@ export async function GET(request: NextRequest) {
         },
       );
     }
+
+    await requireBusinessAccess(
+      businessId,
+      RESOURCE_TYPE_READ_ALLOWED_ROLES,
+    );
 
     const business = await prisma.business.findFirst({
       where: {
@@ -32,7 +100,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!business) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Negocio no encontrado o inactivo",
@@ -70,7 +138,7 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business,
@@ -85,9 +153,22 @@ export async function GET(request: NextRequest) {
       })),
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("GET /api/resource-types error:", error);
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible obtener los tipos de recurso",
@@ -101,7 +182,39 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    await requireAuthenticatedUser();
+
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_RESOURCE_TYPE_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const businessId =
       typeof body.businessId === "string" ? body.businessId.trim() : "";
@@ -114,7 +227,7 @@ export async function POST(request: NextRequest) {
       typeof body.description === "string" ? body.description.trim() : "";
 
     if (!businessId) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "businessId es obligatorio",
@@ -125,8 +238,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    await requireBusinessAccess(
+      businessId,
+      RESOURCE_TYPE_WRITE_ALLOWED_ROLES,
+    );
+
     if (!name) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El nombre del tipo de inventario es obligatorio",
@@ -138,7 +256,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (!slug) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "El slug del tipo de inventario es obligatorio",
@@ -227,7 +345,7 @@ export async function POST(request: NextRequest) {
       },
     );
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: true,
 
@@ -256,12 +374,25 @@ export async function POST(request: NextRequest) {
       },
     );
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("POST /api/resource-types error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
         case "BUSINESS_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Negocio no encontrado o inactivo",
@@ -272,7 +403,7 @@ export async function POST(request: NextRequest) {
           );
 
         case "RESOURCE_TYPE_SLUG_ALREADY_EXISTS":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Ya existe un tipo de inventario con ese slug",
@@ -294,7 +425,7 @@ export async function POST(request: NextRequest) {
         }
       ).code === "P2002"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Ya existe un tipo de inventario con ese slug",
@@ -305,7 +436,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible crear el tipo de inventario",

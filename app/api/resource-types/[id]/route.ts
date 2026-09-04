@@ -1,6 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
 import { prisma } from "@/lib/prisma";
+
+export const dynamic = "force-dynamic";
+
+const RESOURCE_TYPE_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(init.headers);
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  );
+}
 
 type RouteContext = {
   params: Promise<{
@@ -10,9 +65,61 @@ type RouteContext = {
 
 export async function PATCH(request: NextRequest, context: RouteContext) {
   try {
+    await requireAuthenticatedUser();
+
     const { id } = await context.params;
 
-    const body = await request.json();
+    let body: unknown;
+
+    try {
+      body = await request.json();
+    } catch {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_JSON",
+          error:
+            "El cuerpo de la solicitud no es JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (!isJsonObject(body)) {
+      return privateJson(
+        {
+          success: false,
+          code: "INVALID_RESOURCE_TYPE_BODY",
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const businessId =
+      typeof body.businessId === "string" ? body.businessId.trim() : "";
+
+    if (!businessId) {
+      return privateJson(
+        {
+          success: false,
+          error: "businessId es obligatorio",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    await requireBusinessAccess(
+      businessId,
+      RESOURCE_TYPE_WRITE_ALLOWED_ROLES,
+    );
 
     const hasName = Object.prototype.hasOwnProperty.call(body, "name");
 
@@ -24,7 +131,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     );
 
     if (!hasName && !hasSlug && !hasDescription) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "No se enviaron campos para actualizar",
@@ -43,7 +150,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     if (hasName) {
       if (typeof body.name !== "string") {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "El nombre debe ser texto",
@@ -57,7 +164,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       name = body.name.trim();
 
       if (!name) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "El nombre del tipo de inventario es obligatorio",
@@ -71,7 +178,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     if (hasSlug) {
       if (typeof body.slug !== "string") {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "El slug debe ser texto",
@@ -85,7 +192,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       slug = body.slug.trim();
 
       if (!slug) {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "El slug del tipo de inventario es obligatorio",
@@ -105,7 +212,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
         description = normalizedDescription || null;
       } else {
-        return NextResponse.json(
+        return privateJson(
           {
             success: false,
             error: "La descripción debe ser texto o null",
@@ -119,9 +226,10 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const result = await prisma.$transaction(
       async (tx) => {
-        const existing = await tx.resourceType.findUnique({
+        const existing = await tx.resourceType.findFirst({
           where: {
             id,
+            businessId,
           },
 
           select: {
@@ -235,7 +343,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       },
     );
 
-    return NextResponse.json({
+    return privateJson({
       success: true,
 
       business: result.business,
@@ -259,12 +367,25 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       },
     });
   } catch (error) {
+    if (error instanceof AuthorizationError) {
+      return privateJson(
+        {
+          success: false,
+          code: error.code,
+          error: error.message,
+        },
+        {
+          status: error.status,
+        },
+      );
+    }
+
     console.error("PATCH /api/resource-types/[id] error:", error);
 
     if (error instanceof Error) {
       switch (error.message) {
         case "RESOURCE_TYPE_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Tipo de inventario no encontrado",
@@ -275,7 +396,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           );
 
         case "BUSINESS_NOT_FOUND":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Negocio no encontrado o inactivo",
@@ -286,7 +407,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
           );
 
         case "RESOURCE_TYPE_SLUG_ALREADY_EXISTS":
-          return NextResponse.json(
+          return privateJson(
             {
               success: false,
               error: "Ya existe un tipo de inventario con ese slug",
@@ -308,7 +429,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
         }
       ).code === "P2002"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success: false,
           error: "Ya existe un tipo de inventario con ese slug",
@@ -319,7 +440,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success: false,
         error: "No fue posible actualizar el tipo de inventario",

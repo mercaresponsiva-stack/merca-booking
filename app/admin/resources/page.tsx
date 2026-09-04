@@ -297,7 +297,13 @@ export default function ResourcesPage() {
   }, []);
 
   useEffect(() => {
-    void loadData();
+    const timeoutId = window.setTimeout(() => {
+      void loadData();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [loadData]);
 
   const resourceSummary = useMemo(() => {
@@ -713,6 +719,8 @@ export default function ResourcesPage() {
       },
 
       body: JSON.stringify({
+        businessId: BUSINESS_ID,
+
         name: data.name.trim(),
 
         slug: data.slug.trim(),
