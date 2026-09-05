@@ -37,6 +37,73 @@ import {
 
 import { prisma } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic =
+  "force-dynamic";
+
+const RESERVATION_OPTION_WRITE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(
+      init.headers,
+    );
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
+function isJsonObject(
+  value: unknown,
+): value is Record<
+  string,
+  unknown
+> {
+  return (
+    typeof value ===
+      "object" &&
+    value !==
+      null &&
+    !Array.isArray(
+      value,
+    )
+  );
+}
+
 function isPositiveInteger(
   value: unknown,
 ): value is number {
@@ -87,6 +154,8 @@ export async function PATCH(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const {
       id,
       reservationOptionId,
@@ -97,28 +166,20 @@ export async function PATCH(
     // 1. BODY
     // ─────────────────────────────────────────────
 
-    let body:
-      Record<
-        string,
-        unknown
-      >;
+    let parsedBody:
+      unknown;
 
     try {
-      body =
-        (
-          await request.json()
-        ) as Record<
-          string,
-          unknown
-        >;
+      parsedBody =
+        await request.json();
     } catch {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
 
           code:
-            "INVALID_JSON_BODY",
+            "INVALID_JSON",
 
           error:
             "El cuerpo de la solicitud no es JSON válido.",
@@ -130,11 +191,33 @@ export async function PATCH(
       );
     }
 
-    const changedById =
-      typeof body.changedById ===
-        "string"
-        ? body.changedById.trim()
-        : "";
+    if (
+      !isJsonObject(
+        parsedBody,
+      )
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            "INVALID_RESERVATION_OPTION_REMOVE_BODY",
+
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status:
+            400,
+        },
+      );
+    }
+
+    const body =
+      parsedBody;
+
+    // El changedById recibido por compatibilidad no se usa para auditoría.
 
     const removeOptionalQuantity =
       body.removeOptionalQuantity;
@@ -147,32 +230,11 @@ export async function PATCH(
         : null;
 
     if (
-      !changedById
-    ) {
-      return NextResponse.json(
-        {
-          success:
-            false,
-
-          code:
-            "CHANGED_BY_ID_REQUIRED",
-
-          error:
-            "changedById es requerido.",
-        },
-        {
-          status:
-            400,
-        },
-      );
-    }
-
-    if (
       !isPositiveInteger(
         removeOptionalQuantity,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -189,6 +251,34 @@ export async function PATCH(
         },
       );
     }
+
+    // Solo averiguamos el negocio antes de autorizar la operación.
+    const reservationScope =
+      await prisma.reservation.findUnique({
+        where: {
+          id,
+        },
+
+        select: {
+          businessId:
+            true,
+        },
+      });
+
+    if (
+      !reservationScope
+    ) {
+      throw new Error(
+        "RESERVATION_NOT_FOUND",
+      );
+    }
+
+    const access =
+      await requireBusinessAccess(
+        reservationScope.businessId,
+
+        RESERVATION_OPTION_WRITE_ALLOWED_ROLES,
+      );
 
     const requestedAt =
       new Date();
@@ -283,7 +373,7 @@ export async function PATCH(
             await tx.user.findFirst({
               where: {
                 id:
-                  changedById,
+                  access.user.id,
 
                 businessId:
                   reservation
@@ -1542,7 +1632,7 @@ export async function PATCH(
     // 17. RESPONSE
     // ─────────────────────────────────────────────
 
-    return NextResponse.json({
+    return privateJson({
       success:
         true,
 
@@ -1999,6 +2089,28 @@ export async function PATCH(
   } catch (
     error
   ) {
+    if (
+      error instanceof
+        AuthorizationError
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            error.code,
+
+          error:
+            error.message,
+        },
+        {
+          status:
+            error.status,
+        },
+      );
+    }
+
     console.error(
       "PATCH reservation option remove error:",
       error,
@@ -2014,7 +2126,7 @@ export async function PATCH(
       code ===
       "RESERVATION_NOT_FOUND"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2035,7 +2147,7 @@ export async function PATCH(
       code ===
       "RESERVATION_OPTION_NOT_FOUND"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2056,7 +2168,7 @@ export async function PATCH(
       code ===
       "OPTION_REMOVE_ACTOR_NOT_VALID"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2077,7 +2189,7 @@ export async function PATCH(
       code ===
       "BUSINESS_NOT_ACTIVE"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2098,7 +2210,7 @@ export async function PATCH(
       code ===
       "INVALID_RESERVATION_OPTION_REMOVE_QUANTITY"
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2120,7 +2232,7 @@ export async function PATCH(
         code,
       )
     ) {
-      return NextResponse.json(
+      return privateJson(
         {
           success:
             false,
@@ -2137,7 +2249,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(
+    return privateJson(
       {
         success:
           false,
