@@ -1,374 +1,122 @@
 import {
-  NextRequest,
   NextResponse,
 } from "next/server";
 
 import {
-  expirePendingReservation,
-} from "@/lib/booking/reservation-expiration-operation";
+  AuthorizationError,
+  requireAuthenticatedUser,
+} from "@/lib/auth/business-access";
 
-import {
-  prisma,
-} from "@/lib/prisma";
+export const dynamic =
+  "force-dynamic";
 
-type RouteContext = {
-  params:
-    Promise<{
-      id:
-        string;
-    }>;
-};
-
-function errorResponse(
-  status:
-    number,
-
-  code:
-    string,
-
-  error:
-    string,
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
 ) {
+  const headers =
+    new Headers(
+      init.headers,
+    );
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
   return NextResponse.json(
+    body,
     {
-      success:
-        false,
-
-      code,
-
-      error,
-    },
-
-    {
-      status,
+      ...init,
+      headers,
     },
   );
 }
 
-export async function POST(
-  request:
-    NextRequest,
-
-  context:
-    RouteContext,
-) {
+/*
+ * La expiración individual desde HTTP fue retirada.
+ *
+ * Las reservas pendientes vencen exclusivamente
+ * mediante el proceso interno protegido por
+ * CRON_SECRET.
+ */
+export async function POST() {
   try {
-    const {
-      id:
-        reservationId,
-    } =
-      await context.params;
+    await requireAuthenticatedUser();
 
-    let body:
-      unknown;
-
-    try {
-      body =
-        await request.json();
-    } catch {
-      return errorResponse(
-        400,
-        "INVALID_JSON",
-        "El cuerpo de la solicitud no contiene JSON válido.",
-      );
-    }
-
-    if (
-      typeof body !==
-        "object" ||
-      body ===
-        null ||
-      Array.isArray(
-        body,
-      )
-    ) {
-      return errorResponse(
-        400,
-        "INVALID_JSON",
-        "El cuerpo de la solicitud debe ser un objeto JSON válido.",
-      );
-    }
-
-    const payload =
-      body as
-        Record<
-          string,
-          unknown
-        >;
-
-    /*
-     * La expiración usa exclusivamente el reloj
-     * del servidor. No acepta actor, motivo,
-     * estado ni requestedAt desde el cliente.
-     */
-    if (
-      Object.keys(
-        payload,
-      ).length >
-      0
-    ) {
-      return errorResponse(
-        400,
-        "EXPIRATION_PAYLOAD_NOT_ALLOWED",
-        "La expiración no acepta datos controlados por el cliente.",
-      );
-    }
-
-    const requestedAt =
-      new Date();
-
-    const result =
-      await prisma.$transaction(
-        async (
-          tx,
-        ) =>
-          expirePendingReservation({
-            reservationId,
-
-            requestedAt,
-
-            db:
-              tx,
-          }),
-
-        {
-          isolationLevel:
-            "Serializable",
-        },
-      );
-
-    return NextResponse.json(
+    return privateJson(
       {
         success:
-          true,
+          false,
 
-        reservation:
-          result.reservation,
+        code:
+          "MANUAL_RESERVATION_EXPIRATION_DISABLED",
 
-        expiration:
-          result.expiration,
-
-        change: {
-          id:
-            result.change.id,
-
-          type:
-            result.change.type,
-
-          changedById:
-            result.change.changedById,
-
-          reason:
-            result.change.reason,
-
-          oldStatus:
-            result.change.oldStatus,
-
-          newStatus:
-            result.change.newStatus,
-
-          details:
-            result.change.details,
-
-          createdAt:
-            result.change.createdAt,
-        },
-
-        resources:
-          result.resources,
-
-        paymentSummary: {
-          total:
-            result.paymentSummary.total,
-
-          paid:
-            result.paymentSummary.paid,
-
-          grossPaid:
-            result.paymentSummary.grossPaid,
-
-          pending:
-            result.paymentSummary.pending,
-
-          refundPending:
-            result.paymentSummary.refundPending,
-
-          refunded:
-            result.paymentSummary.refunded,
-
-          netPaid:
-            result.paymentSummary.netPaid,
-
-          balance:
-            result.paymentSummary.balance,
-
-          isPaid:
-            result.paymentSummary.isPaid,
-
-          paymentOption:
-            result.paymentSummary
-              .paymentOption,
-
-          requiredInitialPayment:
-            result.paymentSummary
-              .requiredInitialPayment,
-
-          initialPaymentRemaining:
-            result.paymentSummary
-              .initialPaymentRemaining,
-
-          initialPaymentSatisfied:
-            result.paymentSummary
-              .initialPaymentSatisfied,
-
-          balanceDueAt:
-            result.paymentSummary
-              .balanceDueAt,
-        },
-
-        financialState:
-          result.financialState,
+        error:
+          "La expiración manual está deshabilitada. Las reservas pendientes vencen mediante el proceso programado del servidor.",
       },
-
       {
         status:
-          201,
+          410,
       },
     );
   } catch (
     error
   ) {
-    const code =
+    if (
       error instanceof
-        Error
-        ? error.message
-        : null;
-
-    if (
-      code ===
-      "RESERVATION_NOT_FOUND"
+        AuthorizationError
     ) {
-      return errorResponse(
-        404,
-        code,
-        "La reserva no existe.",
-      );
-    }
+      return privateJson(
+        {
+          success:
+            false,
 
-    if (
-      code ===
-      "RESERVATION_NOT_ELIGIBLE_FOR_EXPIRATION"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "Solo una reserva pendiente puede expirar.",
-      );
-    }
+          code:
+            error.code,
 
-    if (
-      code ===
-      "RESERVATION_EXPIRATION_NOT_CONFIGURED"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "La reserva pendiente no tiene una fecha de vencimiento configurada.",
-      );
-    }
-
-    if (
-      code ===
-      "INVALID_EXPIRATION_TIMESTAMP"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "La fecha de vencimiento de la reserva no es válida.",
-      );
-    }
-
-    if (
-      code ===
-      "RESERVATION_EXPIRATION_NOT_DUE"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "La reserva todavía se encuentra dentro de su plazo de pago.",
-      );
-    }
-
-    if (
-      code ===
-      "PENDING_PAYMENTS_MUST_BE_RESOLVED_FOR_EXPIRATION"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "Debes confirmar o rechazar los pagos pendientes antes de expirar la reserva.",
-      );
-    }
-
-    if (
-      code ===
-      "REFUNDS_MUST_BE_RESOLVED_FOR_EXPIRATION"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "Debes completar las devoluciones pendientes antes de expirar la reserva.",
-      );
-    }
-
-    if (
-      code ===
-      "RESERVATION_PAYMENT_PROTECTS_FROM_EXPIRATION"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "El pago inicial requerido ya está cubierto; confirma la reserva en lugar de expirarla.",
-      );
-    }
-
-    if (
-      code ===
-      "PAYMENTS_MUST_BE_RESOLVED_FOR_EXPIRATION"
-    ) {
-      return errorResponse(
-        409,
-        code,
-        "La reserva conserva fondos recibidos y requiere resolución financiera manual antes de expirar.",
-      );
-    }
-
-    if (
-      typeof error ===
-        "object" &&
-      error !==
-        null &&
-      "code" in
-        error &&
-      error.code ===
-        "P2034"
-    ) {
-      return errorResponse(
-        409,
-        "EXPIRATION_SERIALIZATION_CONFLICT",
-        "La reserva cambió mientras se procesaba su vencimiento. Intenta nuevamente.",
+          error:
+            error.message,
+        },
+        {
+          status:
+            error.status,
+        },
       );
     }
 
     console.error(
-      "POST reservation expiration error:",
+      "POST reservation expiration barrier error:",
       error,
     );
 
-    return errorResponse(
-      500,
-      "EXPIRATION_OPERATION_FAILED",
-      "No fue posible expirar la reserva.",
+    return privateJson(
+      {
+        success:
+          false,
+
+        code:
+          "RESERVATION_EXPIRATION_BARRIER_FAILED",
+
+        error:
+          "No fue posible validar la operación de expiración.",
+      },
+      {
+        status:
+          500,
+      },
     );
   }
 }

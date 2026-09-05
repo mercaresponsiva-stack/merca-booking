@@ -2,7 +2,19 @@ import {
   isReservationStatus,
   type ReservationStatus,
 } from "@/lib/booking/reservation-state";
-import { NextRequest, NextResponse } from "next/server";
+
+import {
+  NextRequest,
+  NextResponse,
+} from "next/server";
+
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+} from "@/lib/auth/business-access";
+
+export const dynamic =
+  "force-dynamic";
 
 type StatusBarrier = {
   code: string;
@@ -42,7 +54,7 @@ const STATUS_BARRIERS: Record<
       "EXPIRATION_REQUIRES_DEDICATED_OPERATION",
 
     error:
-      "La expiración debe registrarse mediante la operación dedicada de vencimiento.",
+      "La expiración debe realizarse mediante el proceso programado del servidor.",
   },
 
   NO_SHOW: {
@@ -78,6 +90,41 @@ const STATUS_BARRIERS: Record<
   },
 };
 
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(
+      init.headers,
+    );
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
 function isJsonObject(
   value: unknown,
 ): value is Record<
@@ -98,98 +145,149 @@ function isJsonObject(
 export async function PATCH(
   request: NextRequest,
 ) {
-  let body: unknown;
-
   try {
-    body =
-      await request.json();
-  } catch {
-    return NextResponse.json(
+    await requireAuthenticatedUser();
+
+    let body:
+      unknown;
+
+    try {
+      body =
+        await request.json();
+    } catch {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            "INVALID_JSON",
+
+          error:
+            "El cuerpo de la solicitud no contiene JSON válido.",
+        },
+        {
+          status:
+            400,
+        },
+      );
+    }
+
+    if (
+      !isJsonObject(
+        body,
+      )
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            "INVALID_RESERVATION_STATUS_BODY",
+
+          error:
+            "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+        },
+        {
+          status:
+            400,
+        },
+      );
+    }
+
+    const status =
+      body.status;
+
+    if (
+      !isReservationStatus(
+        status,
+      )
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            "INVALID_RESERVATION_STATUS",
+
+          error:
+            "Estado de reserva inválido.",
+        },
+        {
+          status:
+            400,
+        },
+      );
+    }
+
+    const barrier =
+      STATUS_BARRIERS[
+        status
+      ];
+
+    return privateJson(
       {
         success:
           false,
 
         code:
-          "INVALID_JSON",
+          barrier.code,
 
         error:
-          "El cuerpo de la solicitud no contiene JSON válido.",
+          barrier.error,
       },
       {
         status:
-          400,
+          409,
       },
     );
-  }
-
-  if (
-    !isJsonObject(
-      body,
-    )
+  } catch (
+    error
   ) {
-    return NextResponse.json(
+    if (
+      error instanceof
+        AuthorizationError
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            error.code,
+
+          error:
+            error.message,
+        },
+        {
+          status:
+            error.status,
+        },
+      );
+    }
+
+    console.error(
+      "PATCH reservation status barrier error:",
+      error,
+    );
+
+    return privateJson(
       {
         success:
           false,
 
         code:
-          "INVALID_JSON",
+          "RESERVATION_STATUS_BARRIER_FAILED",
 
         error:
-          "El cuerpo de la solicitud debe ser un objeto JSON válido.",
+          "No fue posible validar la operación de estado.",
       },
       {
         status:
-          400,
+          500,
       },
     );
   }
-
-  const status =
-    body.status;
-
-  if (
-    !isReservationStatus(
-      status,
-    )
-  ) {
-    return NextResponse.json(
-      {
-        success:
-          false,
-
-        code:
-          "INVALID_RESERVATION_STATUS",
-
-        error:
-          "Estado de reserva inválido.",
-      },
-      {
-        status:
-          400,
-      },
-    );
-  }
-
-  const barrier =
-    STATUS_BARRIERS[
-      status
-    ];
-
-  return NextResponse.json(
-    {
-      success:
-        false,
-
-      code:
-        barrier.code,
-
-      error:
-        barrier.error,
-    },
-    {
-      status:
-        409,
-    },
-  );
 }

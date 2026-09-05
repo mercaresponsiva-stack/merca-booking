@@ -11,6 +11,56 @@ import {
   prisma,
 } from "@/lib/prisma";
 
+import {
+  AuthorizationError,
+  requireAuthenticatedUser,
+  requireBusinessAccess,
+} from "@/lib/auth/business-access";
+
+export const dynamic =
+  "force-dynamic";
+
+const RESERVATION_LIFECYCLE_ALLOWED_ROLES = [
+  "OWNER",
+  "ADMIN",
+  "RECEPTIONIST",
+] as const;
+
+function privateJson(
+  body: unknown,
+  init: ResponseInit = {},
+) {
+  const headers =
+    new Headers(
+      init.headers,
+    );
+
+  headers.set(
+    "Cache-Control",
+    "private, no-store, max-age=0, must-revalidate",
+  );
+  headers.set(
+    "Pragma",
+    "no-cache",
+  );
+  headers.set(
+    "Expires",
+    "0",
+  );
+  headers.set(
+    "X-Robots-Tag",
+    "noindex, nofollow",
+  );
+
+  return NextResponse.json(
+    body,
+    {
+      ...init,
+      headers,
+    },
+  );
+}
+
 function errorResponse(
   code:
     string,
@@ -21,7 +71,7 @@ function errorResponse(
   status:
     number,
 ) {
-  return NextResponse.json(
+  return privateJson(
     {
       success:
         false,
@@ -57,6 +107,8 @@ export async function POST(
   },
 ) {
   try {
+    await requireAuthenticatedUser();
+
     const {
       id,
     } =
@@ -86,7 +138,7 @@ export async function POST(
       )
     ) {
       return errorResponse(
-        "INVALID_JSON",
+        "INVALID_COMPLETION_BODY",
         "El cuerpo de la solicitud debe ser un objeto JSON válido.",
         400,
       );
@@ -99,21 +151,7 @@ export async function POST(
           unknown
         >;
 
-    const changedById =
-      typeof body.changedById ===
-        "string"
-        ? body.changedById.trim()
-        : "";
-
-    if (
-      !changedById
-    ) {
-      return errorResponse(
-        "COMPLETION_CHANGED_BY_REQUIRED",
-        "Debes indicar el usuario que completa la reserva.",
-        400,
-      );
-    }
+    // El changedById recibido por compatibilidad no se usa para auditoría.
 
     let reason:
       string | null =
@@ -155,6 +193,33 @@ export async function POST(
         null;
     }
 
+    const reservationScope =
+      await prisma.reservation.findUnique({
+        where: {
+          id,
+        },
+
+        select: {
+          businessId:
+            true,
+        },
+      });
+
+    if (
+      !reservationScope
+    ) {
+      throw new Error(
+        "RESERVATION_NOT_FOUND",
+      );
+    }
+
+    const access =
+      await requireBusinessAccess(
+        reservationScope.businessId,
+
+        RESERVATION_LIFECYCLE_ALLOWED_ROLES,
+      );
+
     const requestedAt =
       new Date();
 
@@ -167,7 +232,8 @@ export async function POST(
             reservationId:
               id,
 
-            changedById,
+            changedById:
+              access.user.id,
 
             reason,
 
@@ -182,7 +248,7 @@ export async function POST(
         },
       );
 
-    return NextResponse.json({
+    return privateJson({
       success:
         true,
 
@@ -210,6 +276,28 @@ export async function POST(
   } catch (
     error
   ) {
+    if (
+      error instanceof
+        AuthorizationError
+    ) {
+      return privateJson(
+        {
+          success:
+            false,
+
+          code:
+            error.code,
+
+          error:
+            error.message,
+        },
+        {
+          status:
+            error.status,
+        },
+      );
+    }
+
     const errorCode =
       error instanceof
       Error
