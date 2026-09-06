@@ -56,6 +56,14 @@ export type CreateHotelReservationInput = {
       number;
   };
 
+  idempotency?: {
+    key:
+      string;
+
+    fingerprint:
+      string;
+  };
+
   serviceId:
     string;
 
@@ -126,6 +134,8 @@ function generateConfirmationCode() {
 
 export async function createHotelReservation({
   business,
+
+  idempotency,
 
   serviceId,
 
@@ -576,6 +586,14 @@ export async function createHotelReservation({
             customerId: customer.id,
 
             confirmationCode: generateConfirmationCode(),
+
+            idempotencyKey:
+              idempotency?.key ??
+              null,
+
+            idempotencyFingerprint:
+              idempotency?.fingerprint ??
+              null,
 
             startAt,
             endAt,

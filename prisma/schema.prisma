@@ -581,6 +581,11 @@ model Reservation {
 
   confirmationCode String @unique
 
+  // Identidad persistente de solicitudes realizadas mediante la API pública.
+  // Permanece nula para reservas creadas desde superficies administrativas.
+  idempotencyKey         String? @db.VarChar(36)
+  idempotencyFingerprint String? @db.VarChar(64)
+
   // Intervalo universal de reserva.
   startAt DateTime
   endAt   DateTime
@@ -627,6 +632,7 @@ model Reservation {
 
   changes ReservationChange[]
 
+  @@unique([businessId, idempotencyKey])
   @@index([businessId, startAt, endAt])
   @@index([customerId])
   @@index([status])
