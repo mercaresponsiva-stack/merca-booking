@@ -7,6 +7,11 @@ import {
 } from "@/lib/prisma";
 
 import {
+  getPaymentOptionLabel,
+  getPaymentOptionPercentage,
+} from "@/lib/booking/payment-option";
+
+import {
   PUBLIC_CATALOG_CACHE,
   publicError,
   publicJson,
@@ -138,6 +143,9 @@ export async function GET(
           currency:
             true,
 
+          enabledPaymentOptions:
+            true,
+
           timezone:
             true,
 
@@ -176,6 +184,26 @@ export async function GET(
 
           currency:
             business.currency,
+
+          paymentOptions:
+            business
+              .enabledPaymentOptions
+              .map(
+                (paymentOption) => ({
+                  value:
+                    paymentOption,
+
+                  label:
+                    getPaymentOptionLabel(
+                      paymentOption,
+                    ),
+
+                  percentage:
+                    getPaymentOptionPercentage(
+                      paymentOption,
+                    ),
+                }),
+              ),
 
           timezone:
             business.timezone,

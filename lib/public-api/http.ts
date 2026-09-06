@@ -11,8 +11,28 @@ export const PUBLIC_CATALOG_CACHE =
 const PUBLIC_PREFLIGHT_CACHE =
   "public, max-age=86400";
 
+const DEFAULT_PUBLIC_METHODS = [
+  "GET",
+  "OPTIONS",
+] as const;
+
+const DEFAULT_PUBLIC_HEADERS = [
+  "Content-Type",
+] as const;
+
+export type PublicCorsOptions = {
+  allowedMethods?:
+    readonly string[];
+
+  allowedHeaders?:
+    readonly string[];
+};
+
 function applyPublicHeaders(
   headers: Headers,
+
+  corsOptions:
+    PublicCorsOptions = {},
 ) {
   headers.set(
     "Access-Control-Allow-Origin",
@@ -21,12 +41,18 @@ function applyPublicHeaders(
 
   headers.set(
     "Access-Control-Allow-Methods",
-    "GET, OPTIONS",
+    (
+      corsOptions.allowedMethods ??
+      DEFAULT_PUBLIC_METHODS
+    ).join(", "),
   );
 
   headers.set(
     "Access-Control-Allow-Headers",
-    "Content-Type",
+    (
+      corsOptions.allowedHeaders ??
+      DEFAULT_PUBLIC_HEADERS
+    ).join(", "),
   );
 
   headers.set(
@@ -82,12 +108,17 @@ export function publicJson(
   body: unknown,
 
   init: ResponseInit = {},
+
+  corsOptions:
+    PublicCorsOptions = {},
 ) {
   const headers =
     applyPublicHeaders(
       new Headers(
         init.headers,
       ),
+
+      corsOptions,
     );
 
   return NextResponse.json(
@@ -106,6 +137,9 @@ export function publicError(
   code: string,
 
   error: string,
+
+  corsOptions:
+    PublicCorsOptions = {},
 ) {
   return publicJson(
     {
@@ -119,10 +153,15 @@ export function publicError(
     {
       status,
     },
+
+    corsOptions,
   );
 }
 
-export function publicOptions() {
+export function publicOptions(
+  corsOptions:
+    PublicCorsOptions = {},
+) {
   const headers =
     applyPublicHeaders(
       new Headers({
@@ -132,6 +171,8 @@ export function publicOptions() {
         "Access-Control-Max-Age":
           "86400",
       }),
+
+      corsOptions,
     );
 
   return new NextResponse(

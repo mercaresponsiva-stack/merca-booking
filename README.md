@@ -1,36 +1,39 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Merca Booking
 
-## Getting Started
+Merca Booking es una plataforma de gestión de reservas multi-negocio desarrollada con Next.js, Prisma y PostgreSQL.
 
-First, run the development server:
+El primer vertical implementado es alojamiento hotelero e incluye disponibilidad, tarifas, inventario, reservas, pagos, cancelaciones, devoluciones y administración por negocio.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+## Desarrollo local
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Instala las dependencias y prepara la base de datos:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+    npm install
+    npx prisma migrate dev
+    npx prisma generate
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Inicia el servidor:
 
-## Learn More
+    npm run dev
 
-To learn more about Next.js, take a look at the following resources:
+La aplicación estará disponible en `http://localhost:3000`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Comprobaciones
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+    npm run lint
+    npx tsc --noEmit
+    npm run build
 
-## Deploy on Vercel
+## API pública
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+La API pública versionada permite consultar el catálogo hotelero, verificar disponibilidad y crear reservas desde sitios externos como Webflow.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Consulta la guía en [docs/public-api-v1.md](docs/public-api-v1.md).
+
+## Producción
+
+Aplica las migraciones con:
+
+    npx prisma migrate deploy
+
+Las variables privadas deben configurarse directamente en el entorno de despliegue y nunca almacenarse en Git.
